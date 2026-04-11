@@ -1,5 +1,18 @@
 auth.json
 output/
-*.exe
+
+# binaries
 b00p
-b00p_linux
+b00p_*
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
