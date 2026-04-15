@@ -48,9 +48,9 @@ type ProgressLogger interface {
 // discardLogger silently drops all log output.
 type discardLogger struct{}
 
-func (discardLogger) Printf(string, ...interface{})    {}
-func (discardLogger) Progress(string, ...interface{})   {}
-func (discardLogger) ClearProgress()                    {}
+func (discardLogger) Printf(string, ...interface{})   {}
+func (discardLogger) Progress(string, ...interface{}) {}
+func (discardLogger) ClearProgress()                  {}
 
 // NewClient creates a new Boosty API client.
 func NewClient(tokens *Tokens, authPath string) *Client {

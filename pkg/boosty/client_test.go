@@ -34,9 +34,9 @@ func TestGetJSON_Success(t *testing.T) {
 	defer server.Close()
 
 	c := &Client{
-		Tokens:   &Tokens{AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
-		HTTP:     server.Client(),
-		Log:      discardLogger{},
+		Tokens: &Tokens{AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		HTTP:   server.Client(),
+		Log:    discardLogger{},
 	}
 
 	var result map[string]string
@@ -70,9 +70,9 @@ func TestGetJSON_RetryOnNetworkError(t *testing.T) {
 	defer server.Close()
 
 	c := &Client{
-		Tokens:   &Tokens{AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
-		HTTP:     server.Client(),
-		Log:      discardLogger{},
+		Tokens: &Tokens{AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		HTTP:   server.Client(),
+		Log:    discardLogger{},
 	}
 
 	var result map[string]string
@@ -93,9 +93,9 @@ func TestGetJSON_ReturnsErrorOnHTTPError(t *testing.T) {
 	defer server.Close()
 
 	c := &Client{
-		Tokens:   &Tokens{AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
-		HTTP:     server.Client(),
-		Log:      discardLogger{},
+		Tokens: &Tokens{AccessToken: "test-token", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		HTTP:   server.Client(),
+		Log:    discardLogger{},
 	}
 
 	var result map[string]string

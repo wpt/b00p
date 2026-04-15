@@ -17,29 +17,29 @@ type PaginationExtra struct {
 
 // Post represents a single blog post.
 type Post struct {
-	ID                string            `json:"id"`
-	Title             string            `json:"title"`
-	CreatedAt         int64             `json:"createdAt"`
-	PublishTime       int64             `json:"publishTime"`
-	UpdatedAt         int64             `json:"updatedAt"`
-	HasAccess         bool              `json:"hasAccess"`
-	Price             int               `json:"price"`
-	CurrencyPrices    map[string]float64    `json:"currencyPrices,omitempty"`
-	SubscriptionLevel *PostSubLevel     `json:"subscriptionLevel,omitempty"`
-	User              PostUser          `json:"user"`
-	Data              []ContentBlock    `json:"data"`
-	Tags              []Tag             `json:"tags"`
-	Count             PostCount         `json:"count"`
-	SignedQuery       string            `json:"signedQuery"`
+	ID                string             `json:"id"`
+	Title             string             `json:"title"`
+	CreatedAt         int64              `json:"createdAt"`
+	PublishTime       int64              `json:"publishTime"`
+	UpdatedAt         int64              `json:"updatedAt"`
+	HasAccess         bool               `json:"hasAccess"`
+	Price             int                `json:"price"`
+	CurrencyPrices    map[string]float64 `json:"currencyPrices,omitempty"`
+	SubscriptionLevel *PostSubLevel      `json:"subscriptionLevel,omitempty"`
+	User              PostUser           `json:"user"`
+	Data              []ContentBlock     `json:"data"`
+	Tags              []Tag              `json:"tags"`
+	Count             PostCount          `json:"count"`
+	SignedQuery       string             `json:"signedQuery"`
 }
 
 // PostSubLevel is the minimum subscription tier required to access a post.
 type PostSubLevel struct {
-	ID             int64          `json:"id"`
-	Name           string         `json:"name"`
-	Price          int            `json:"price"`
+	ID             int64              `json:"id"`
+	Name           string             `json:"name"`
+	Price          int                `json:"price"`
 	CurrencyPrices map[string]float64 `json:"currencyPrices,omitempty"`
-	IsArchived     bool           `json:"isArchived"`
+	IsArchived     bool               `json:"isArchived"`
 }
 
 // PostUser is the author of a post.
@@ -95,10 +95,10 @@ type CommentsResponse struct {
 type Comment struct {
 	ID         string            `json:"id"`
 	AuthorID   int64             `json:"intId"`
-	Author     CommentAuthor    `json:"author"`
-	Data       []ContentBlock   `json:"data"`
-	CreatedAt  int64            `json:"createdAt"`
-	ReplyCount int              `json:"replyCount"`
+	Author     CommentAuthor     `json:"author"`
+	Data       []ContentBlock    `json:"data"`
+	CreatedAt  int64             `json:"createdAt"`
+	ReplyCount int               `json:"replyCount"`
 	Replies    *CommentsResponse `json:"replies,omitempty"`
 }
 

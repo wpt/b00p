@@ -202,7 +202,9 @@ func downloadAllPosts(c *boosty.Client, blog string) error {
 	c.Log.Printf("Fetching all posts from %s...", blog)
 
 	blogDir := filepath.Join(outputDir, blog)
-	os.MkdirAll(blogDir, 0755)
+	if err := os.MkdirAll(blogDir, 0755); err != nil {
+		return err
+	}
 
 	st := state.Load(blogDir)
 	var stMu sync.Mutex
@@ -309,7 +311,9 @@ func syncBlog(c *boosty.Client, blog string) error {
 	c.Log.Printf("Syncing %s...", blog)
 
 	blogDir := filepath.Join(outputDir, blog)
-	os.MkdirAll(blogDir, 0755)
+	if err := os.MkdirAll(blogDir, 0755); err != nil {
+		return err
+	}
 
 	st := state.Load(blogDir)
 
@@ -476,7 +480,9 @@ func syncBlog(c *boosty.Client, blog string) error {
 				continue
 			}
 			st.Add(item.Post.ID, postStateEntry(&item.Post, item.DirName))
-			st.Save()
+			if err := st.Save(); err != nil {
+				c.Log.Printf("  warning: failed to save state: %v", err)
+			}
 
 		case actionUpdated:
 			c.Log.Printf("  updating: %s", item.Post.Title)
@@ -487,18 +493,29 @@ func syncBlog(c *boosty.Client, blog string) error {
 				c.Log.Printf("  error fetching post: %v", err)
 				continue
 			}
-			data, _ := json.MarshalIndent(fullPost, "", "  ")
-			os.WriteFile(filepath.Join(dir, "post.json"), data, 0644)
+			data, err := json.MarshalIndent(fullPost, "", "  ")
+			if err != nil {
+				c.Log.Printf("  error marshaling post: %v", err)
+				continue
+			}
+			if err := os.WriteFile(filepath.Join(dir, "post.json"), data, 0644); err != nil {
+				c.Log.Printf("  error writing post.json: %v", err)
+				continue
+			}
 			if withMD {
 				parsed := parser.ParseBlocks(fullPost.Data)
 				md := parser.GenerateMarkdown(&fullPost, parsed)
-				os.WriteFile(filepath.Join(dir, "post.md"), []byte(md), 0644)
+				if err := os.WriteFile(filepath.Join(dir, "post.md"), []byte(md), 0644); err != nil {
+					c.Log.Printf("  error writing post.md: %v", err)
+				}
 			}
 			entry := postStateEntry(&fullPost, item.DirName)
 			entry.HasComments = st.Posts[item.Post.ID].HasComments
 			entry.HasMd = st.Posts[item.Post.ID].HasMd || withMD
 			st.Add(item.Post.ID, entry)
-			st.Save()
+			if err := st.Save(); err != nil {
+				c.Log.Printf("  warning: failed to save state: %v", err)
+			}
 
 		case actionComments:
 			c.Log.Printf("  updating comments: %s", item.Post.Title)
@@ -511,7 +528,9 @@ func syncBlog(c *boosty.Client, blog string) error {
 			entry.CommentsCount = item.Post.Count.Comments
 			entry.HasComments = true
 			st.Add(item.Post.ID, entry)
-			st.Save()
+			if err := st.Save(); err != nil {
+				c.Log.Printf("  warning: failed to save state: %v", err)
+			}
 
 		case actionVideoMismatch:
 			c.Log.Printf("  re-downloading video: %s", item.Post.Title)
@@ -529,7 +548,9 @@ func syncBlog(c *boosty.Client, blog string) error {
 					os.Remove(filepath.Join(dir, m.Filename))
 				}
 			}
-			downloader.DownloadMedia(c, parsed.Media, dir)
+			if err := downloader.DownloadMedia(c, parsed.Media, dir); err != nil {
+				c.Log.Printf("  error re-downloading media: %v", err)
+			}
 
 		case actionFilesMissing:
 			c.Log.Printf("  re-downloading: %s (%s)", item.Post.Title, item.Detail)
@@ -538,13 +559,17 @@ func syncBlog(c *boosty.Client, blog string) error {
 				continue
 			}
 			st.Add(item.Post.ID, postStateEntry(&item.Post, item.DirName))
-			st.Save()
+			if err := st.Save(); err != nil {
+				c.Log.Printf("  warning: failed to save state: %v", err)
+			}
 
 		case actionLocked:
 			entry := st.Posts[item.Post.ID]
 			entry.Locked = true
 			st.Add(item.Post.ID, entry)
-			st.Save()
+			if err := st.Save(); err != nil {
+				c.Log.Printf("  warning: failed to save state: %v", err)
+			}
 		}
 	}
 

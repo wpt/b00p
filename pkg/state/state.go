@@ -27,7 +27,7 @@ type PostEntry struct {
 // State tracks which posts have been downloaded for a blog.
 type State struct {
 	Posts    map[string]PostEntry `json:"posts"`
-	LastSync string              `json:"lastSync"`
+	LastSync string               `json:"lastSync"`
 	path     string
 }
 
