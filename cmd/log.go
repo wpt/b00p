@@ -7,11 +7,11 @@ type stdLogger struct {
 	hasProgress bool
 }
 
-func (stdLogger) Printf(format string, args ...interface{}) {
+func (stdLogger) Printf(format string, args ...any) {
 	fmt.Printf(format+"\n", args...)
 }
 
-func (l *stdLogger) Progress(format string, args ...interface{}) {
+func (l *stdLogger) Progress(format string, args ...any) {
 	l.hasProgress = true
 	fmt.Printf("\r"+format, args...)
 }
