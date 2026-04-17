@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,10 +59,7 @@ func TestSanitizeTitle(t *testing.T) {
 
 func TestSanitizeTitle_LongTitle(t *testing.T) {
 	// 100 character cyrillic string
-	long := ""
-	for i := 0; i < 100; i++ {
-		long += "я"
-	}
+	long := strings.Repeat("я", 100)
 	got := SanitizeTitle(long)
 	if len([]rune(got)) > 80 {
 		t.Errorf("SanitizeTitle(100 chars) = %d runes, want <= 80", len([]rune(got)))

@@ -32,7 +32,7 @@ type Client struct {
 // Logger is the interface for logging messages.
 // Implement this to capture b00p output in your application.
 type Logger interface {
-	Printf(format string, args ...interface{})
+	Printf(format string, args ...any)
 }
 
 // ProgressLogger extends Logger with support for in-place progress updates.
@@ -40,7 +40,7 @@ type ProgressLogger interface {
 	Logger
 	// Progress writes a line that will be overwritten by the next Progress call.
 	// Used for spinner/progress bar during downloads.
-	Progress(format string, args ...interface{})
+	Progress(format string, args ...any)
 	// ClearProgress clears the current progress line.
 	ClearProgress()
 }
@@ -48,9 +48,9 @@ type ProgressLogger interface {
 // discardLogger silently drops all log output.
 type discardLogger struct{}
 
-func (discardLogger) Printf(string, ...interface{})   {}
-func (discardLogger) Progress(string, ...interface{}) {}
-func (discardLogger) ClearProgress()                  {}
+func (discardLogger) Printf(string, ...any)   {}
+func (discardLogger) Progress(string, ...any) {}
+func (discardLogger) ClearProgress()          {}
 
 // NewClient creates a new Boosty API client.
 func NewClient(tokens *Tokens, authPath string) *Client {
@@ -64,15 +64,21 @@ func NewClient(tokens *Tokens, authPath string) *Client {
 	}
 }
 
+// waitRetry logs and sleeps before retry attempt N (1-based, in range [1, maxRetries]).
+// The label prefixes the log line (e.g. "retry" or "download retry").
+func (c *Client) waitRetry(label string, attempt int) {
+	delay := retryDelays[attempt-1]
+	c.Log.Printf("  %s %d/%d in %s...", label, attempt, maxRetries, delay)
+	time.Sleep(delay)
+}
+
 // GetJSON makes an authenticated GET request and decodes the JSON response.
 // Retries on network errors with backoff.
-func (c *Client) GetJSON(url string, out interface{}) error {
+func (c *Client) GetJSON(url string, out any) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := retryDelays[attempt-1]
-			c.Log.Printf("  retry %d/%d in %s...", attempt, maxRetries, delay)
-			time.Sleep(delay)
+			c.waitRetry("retry", attempt)
 		}
 
 		resp, err := c.doRequest("GET", url)
@@ -110,9 +116,7 @@ func (c *Client) DownloadFile(url, path string) error {
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			delay := retryDelays[attempt-1]
-			c.Log.Printf("  download retry %d/%d in %s...", attempt, maxRetries, delay)
-			time.Sleep(delay)
+			c.waitRetry("download retry", attempt)
 			os.Remove(path) // clean up partial file
 		}
 
