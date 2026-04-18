@@ -100,6 +100,8 @@ func runDownload(cmd *cobra.Command, args []string) error {
 }
 
 // postStateEntry builds a state.PostEntry from a post.
+// HasComments / HasMd reflect the current run's flags; for updates of an
+// existing post use postStateEntryPreserving to carry over prior flags.
 func postStateEntry(post *boosty.Post, dirName string) state.PostEntry {
 	tier := ""
 	if post.SubscriptionLevel != nil {
@@ -117,6 +119,25 @@ func postStateEntry(post *boosty.Post, dirName string) state.PostEntry {
 	}
 }
 
+// postStateEntryPreserving builds a state entry from an updated post while
+// carrying HasComments/HasMd flags from the prior entry, so that re-saving
+// a post without re-downloading comments/md does not "forget" those files.
+func postStateEntryPreserving(post *boosty.Post, dirName string, old state.PostEntry) state.PostEntry {
+	entry := postStateEntry(post, dirName)
+	entry.HasComments = old.HasComments
+	entry.HasMd = old.HasMd || withMD
+	return entry
+}
+
+// writeJSON marshals v with indent and writes it to path (0644).
+func writeJSON(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", filepath.Base(path), err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
 func savePost(c *boosty.Client, blog string, post *boosty.Post) error {
 	if !post.HasAccess {
 		c.Log.Printf("  skipping (no access): %s", post.Title)
@@ -130,11 +151,7 @@ func savePost(c *boosty.Client, blog string, post *boosty.Post) error {
 	}
 
 	// Save post.json
-	data, err := json.MarshalIndent(post, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal post: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "post.json"), data, 0644); err != nil {
+	if err := writeJSON(filepath.Join(dir, "post.json"), post); err != nil {
 		return err
 	}
 	c.Log.Printf("  saved post.json: %s", post.Title)
@@ -182,11 +199,7 @@ func downloadComments(c *boosty.Client, blog, postID, dir string) error {
 		allComments = append(allComments, comment)
 	}
 
-	data, err := json.MarshalIndent(allComments, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal comments: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "comments.json"), data, 0644); err != nil {
+	if err := writeJSON(filepath.Join(dir, "comments.json"), allComments); err != nil {
 		return err
 	}
 	c.Log.Printf("  saved comments.json (%d comments)", len(allComments))
@@ -240,14 +253,8 @@ func downloadAllPosts(c *boosty.Client, blog string) error {
 
 	c.Log.Printf("Found %d posts to download (workers: %d)", len(jobs), numWorkers)
 
-	// Download with worker pool
-	workers := numWorkers
-	if workers < 1 {
-		workers = 1
-	}
-	if workers > len(jobs) {
-		workers = len(jobs)
-	}
+	// Download with worker pool: clamp to [1, len(jobs)]
+	workers := max(1, min(numWorkers, len(jobs)))
 
 	var downloaded int
 	jobCh := make(chan postJob, len(jobs))
@@ -257,7 +264,7 @@ func downloadAllPosts(c *boosty.Client, blog string) error {
 	close(jobCh)
 
 	var wg sync.WaitGroup
-	for w := 0; w < workers; w++ {
+	for range workers {
 		wg.Go(func() {
 			for job := range jobCh {
 				c.Log.Printf("  [%d] %s", job.num, job.post.Title)
@@ -493,12 +500,7 @@ func syncBlog(c *boosty.Client, blog string) error {
 				c.Log.Printf("  error fetching post: %v", err)
 				continue
 			}
-			data, err := json.MarshalIndent(fullPost, "", "  ")
-			if err != nil {
-				c.Log.Printf("  error marshaling post: %v", err)
-				continue
-			}
-			if err := os.WriteFile(filepath.Join(dir, "post.json"), data, 0644); err != nil {
+			if err := writeJSON(filepath.Join(dir, "post.json"), fullPost); err != nil {
 				c.Log.Printf("  error writing post.json: %v", err)
 				continue
 			}
@@ -509,10 +511,7 @@ func syncBlog(c *boosty.Client, blog string) error {
 					c.Log.Printf("  error writing post.md: %v", err)
 				}
 			}
-			entry := postStateEntry(&fullPost, item.DirName)
-			entry.HasComments = st.Posts[item.Post.ID].HasComments
-			entry.HasMd = st.Posts[item.Post.ID].HasMd || withMD
-			st.Add(item.Post.ID, entry)
+			st.Add(item.Post.ID, postStateEntryPreserving(&fullPost, item.DirName, st.Posts[item.Post.ID]))
 			if err := st.Save(); err != nil {
 				c.Log.Printf("  warning: failed to save state: %v", err)
 			}
