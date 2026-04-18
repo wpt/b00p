@@ -73,14 +73,44 @@ func (s *State) Add(postID string, entry PostEntry) {
 	s.Posts[postID] = entry
 }
 
-// Save writes the state to disk.
+// Save writes the state to disk atomically (write to temp file then rename),
+// so an interrupted write cannot truncate the existing state file.
 func (s *State) Save() error {
 	s.LastSync = time.Now().Format(time.RFC3339)
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0644)
+	return WriteFileAtomic(s.path, data, 0644)
+}
+
+// WriteFileAtomic writes data to path via a temp file in the same directory,
+// fsyncs it, then renames over the destination. A crash mid-write leaves the
+// original file untouched.
+func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) // no-op if rename succeeded
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // Count returns the number of tracked posts.

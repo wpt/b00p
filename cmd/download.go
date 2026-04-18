@@ -89,7 +89,8 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		if err := c.GetJSON(url, &post); err != nil {
 			return fmt.Errorf("fetch post: %w", err)
 		}
-		return savePost(c, blog, &post)
+		_, err := savePost(c, blog, &post)
+		return err
 	}
 
 	if syncMode {
@@ -129,30 +130,66 @@ func postStateEntryPreserving(post *boosty.Post, dirName string, old state.PostE
 	return entry
 }
 
-// writeJSON marshals v with indent and writes it to path (0644).
+// writeJSON marshals v with indent and writes it to path (0644) atomically.
 func writeJSON(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", filepath.Base(path), err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return state.WriteFileAtomic(path, data, 0644)
 }
 
-func savePost(c *boosty.Client, blog string, post *boosty.Post) error {
+// writePostMarkdown generates markdown for a post and writes it to dir/post.md
+// atomically. Returns an error so callers can avoid persisting HasMd=true on
+// failure.
+func writePostMarkdown(post *boosty.Post, parsed parser.ParsedContent, dir string) error {
+	md := parser.GenerateMarkdown(post, parsed)
+	return state.WriteFileAtomic(filepath.Join(dir, "post.md"), []byte(md), 0644)
+}
+
+// resolveDirName returns a directory name (relative to blogDir) safe to use for
+// the given postID. If base is free or already holds this same post, base is
+// returned. If base is occupied by a different post's post.json, the post ID
+// is appended as a suffix so the caller never silently overwrites a sibling.
+func resolveDirName(blogDir, postID, base string) string {
+	target := filepath.Join(blogDir, base)
+	data, err := os.ReadFile(filepath.Join(target, "post.json"))
+	if err != nil {
+		return base
+	}
+	var existing struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &existing); err != nil || existing.ID == "" || existing.ID == postID {
+		return base
+	}
+	suffix := postID
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	return base + "_" + suffix
+}
+
+// savePost downloads a post's full content into the output directory.
+// Returns the directory name actually used (which may include a collision
+// suffix) so the caller can record it in state.
+func savePost(c *boosty.Client, blog string, post *boosty.Post) (string, error) {
 	if !post.HasAccess {
 		c.Log.Printf("  skipping (no access): %s", post.Title)
-		return nil
+		return "", nil
 	}
 
+	blogDir := filepath.Join(outputDir, blog)
 	dirName := parser.FormatDirName(dirFormat, post.Title, post.PublishTime, post.ID)
-	dir := filepath.Join(outputDir, blog, dirName)
+	dirName = resolveDirName(blogDir, post.ID, dirName)
+	dir := filepath.Join(blogDir, dirName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+		return "", err
 	}
 
 	// Save post.json
 	if err := writeJSON(filepath.Join(dir, "post.json"), post); err != nil {
-		return err
+		return "", err
 	}
 	c.Log.Printf("  saved post.json: %s", post.Title)
 
@@ -161,7 +198,7 @@ func savePost(c *boosty.Client, blog string, post *boosty.Post) error {
 
 	// Download media
 	if err := downloader.DownloadMedia(c, parsed.Media, dir); err != nil {
-		return err
+		return "", err
 	}
 
 	// External videos
@@ -173,9 +210,8 @@ func savePost(c *boosty.Client, blog string, post *boosty.Post) error {
 
 	// Markdown
 	if withMD {
-		md := parser.GenerateMarkdown(post, parsed)
-		if err := os.WriteFile(filepath.Join(dir, "post.md"), []byte(md), 0644); err != nil {
-			return err
+		if err := writePostMarkdown(post, parsed, dir); err != nil {
+			return "", err
 		}
 		c.Log.Printf("  saved post.md")
 	}
@@ -187,7 +223,7 @@ func savePost(c *boosty.Client, blog string, post *boosty.Post) error {
 		}
 	}
 
-	return nil
+	return dirName, nil
 }
 
 func downloadComments(c *boosty.Client, blog, postID, dir string) error {
@@ -268,12 +304,12 @@ func downloadAllPosts(c *boosty.Client, blog string) error {
 		wg.Go(func() {
 			for job := range jobCh {
 				c.Log.Printf("  [%d] %s", job.num, job.post.Title)
-				if err := savePost(c, blog, &job.post); err != nil {
+				dirName, err := savePost(c, blog, &job.post)
+				if err != nil {
 					c.Log.Printf("  error: %v", err)
 					continue
 				}
 
-				dirName := parser.FormatDirName(dirFormat, job.post.Title, job.post.PublishTime, job.post.ID)
 				stMu.Lock()
 				st.Add(job.post.ID, postStateEntry(&job.post, dirName))
 				if err := st.Save(); err != nil {
@@ -356,9 +392,19 @@ func syncBlog(c *boosty.Client, blog string) error {
 			continue
 		}
 
-		if post.UpdatedAt != existing.UpdatedAt {
+		// State entries written before UpdatedAt was added to the schema have
+		// UpdatedAt == 0; treating that as an edit would flag every such post as
+		// UPDATED on first sync after upgrade. Require a known previous value.
+		if existing.UpdatedAt != 0 && post.UpdatedAt != existing.UpdatedAt {
 			items = append(items, syncItem{Action: actionUpdated, Post: post, DirName: existing.DirName, Detail: "post edited"})
 			continue
+		}
+
+		// Opportunistic backfill: record UpdatedAt for legacy entries so future
+		// syncs can detect real edits. Persists on the next state.Save().
+		if existing.UpdatedAt == 0 && post.UpdatedAt != 0 {
+			existing.UpdatedAt = post.UpdatedAt
+			st.Posts[post.ID] = existing
 		}
 
 		if post.Count.Comments != existing.CommentsCount {
@@ -376,20 +422,48 @@ func syncBlog(c *boosty.Client, blog string) error {
 
 	// Phase 2.5: Check media sizes if requested
 	if checkMedia {
-		c.Log.Printf("Checking media sizes...")
+		// Collect indices to check. A video mismatch overrides the current
+		// classification (e.g. a COMMENTS item with a missing video gets
+		// promoted to VIDEO_MISMATCH so the video is refetched).
+		var jobs []int
 		for i, item := range items {
-			if item.Action != actionNoChange && item.Action != actionUpdated {
+			switch item.Action {
+			case actionNoChange, actionUpdated, actionComments:
+			default:
 				continue
 			}
 			if !item.Post.HasAccess {
 				continue
 			}
-			mismatch := checkVideoSizes(c, blog, &item.Post, filepath.Join(blogDir, item.DirName))
-			if mismatch != "" {
-				items[i].Action = actionVideoMismatch
-				items[i].Detail = mismatch
-			}
+			jobs = append(jobs, i)
 		}
+
+		workers := max(1, min(numWorkers, len(jobs)))
+		c.Log.Printf("Checking media sizes (%d posts, %d workers)...", len(jobs), workers)
+
+		jobCh := make(chan int, len(jobs))
+		for _, j := range jobs {
+			jobCh <- j
+		}
+		close(jobCh)
+
+		var wg sync.WaitGroup
+		for range workers {
+			wg.Go(func() {
+				for idx := range jobCh {
+					post := items[idx].Post
+					dir := filepath.Join(blogDir, items[idx].DirName)
+					mismatch := checkVideoSizes(c, blog, &post, dir)
+					if mismatch != "" {
+						// Each worker owns distinct indices, so writing
+						// items[idx] concurrently is safe.
+						items[idx].Action = actionVideoMismatch
+						items[idx].Detail = mismatch
+					}
+				}
+			})
+		}
+		wg.Wait()
 	}
 
 	// Phase 2.6: Check files on disk if requested
@@ -482,11 +556,12 @@ func syncBlog(c *boosty.Client, blog string) error {
 		switch item.Action {
 		case actionNew, actionUnlocked:
 			c.Log.Printf("  downloading: %s", item.Post.Title)
-			if err := savePost(c, blog, &item.Post); err != nil {
+			dirName, err := savePost(c, blog, &item.Post)
+			if err != nil {
 				c.Log.Printf("  error: %v", err)
 				continue
 			}
-			st.Add(item.Post.ID, postStateEntry(&item.Post, item.DirName))
+			st.Add(item.Post.ID, postStateEntry(&item.Post, dirName))
 			if err := st.Save(); err != nil {
 				c.Log.Printf("  warning: failed to save state: %v", err)
 			}
@@ -504,14 +579,22 @@ func syncBlog(c *boosty.Client, blog string) error {
 				c.Log.Printf("  error writing post.json: %v", err)
 				continue
 			}
+			mdWritten := false
 			if withMD {
 				parsed := parser.ParseBlocks(fullPost.Data)
-				md := parser.GenerateMarkdown(&fullPost, parsed)
-				if err := os.WriteFile(filepath.Join(dir, "post.md"), []byte(md), 0644); err != nil {
+				if err := writePostMarkdown(&fullPost, parsed, dir); err != nil {
 					c.Log.Printf("  error writing post.md: %v", err)
+				} else {
+					mdWritten = true
 				}
 			}
-			st.Add(item.Post.ID, postStateEntryPreserving(&fullPost, item.DirName, st.Posts[item.Post.ID]))
+			entry := postStateEntryPreserving(&fullPost, item.DirName, st.Posts[item.Post.ID])
+			if withMD && !mdWritten {
+				// Don't claim md exists when this run failed to write it; keep
+				// whatever the prior entry said.
+				entry.HasMd = st.Posts[item.Post.ID].HasMd
+			}
+			st.Add(item.Post.ID, entry)
 			if err := st.Save(); err != nil {
 				c.Log.Printf("  warning: failed to save state: %v", err)
 			}
@@ -541,23 +624,39 @@ func syncBlog(c *boosty.Client, blog string) error {
 				continue
 			}
 			parsed := parser.ParseBlocks(fullPost.Data)
-			// Delete existing videos so integrity check doesn't skip them
+			// Delete existing videos so DownloadFile's integrity check doesn't
+			// skip them as already-present. If remove fails we must abort this
+			// video: leaving the old file means the redownload is a no-op.
+			removeFailed := false
 			for _, m := range parsed.Media {
-				if m.Type == "video" {
-					os.Remove(filepath.Join(dir, m.Filename))
+				if m.Type != "video" {
+					continue
 				}
+				p := filepath.Join(dir, m.Filename)
+				if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+					c.Log.Printf("  error: cannot remove %s: %v (skipping redownload)", p, err)
+					removeFailed = true
+				}
+			}
+			if removeFailed {
+				continue
 			}
 			if err := downloader.DownloadMedia(c, parsed.Media, dir); err != nil {
 				c.Log.Printf("  error re-downloading media: %v", err)
 			}
+			st.Add(item.Post.ID, postStateEntryPreserving(&fullPost, item.DirName, st.Posts[item.Post.ID]))
+			if err := st.Save(); err != nil {
+				c.Log.Printf("  warning: failed to save state: %v", err)
+			}
 
 		case actionFilesMissing:
 			c.Log.Printf("  re-downloading: %s (%s)", item.Post.Title, item.Detail)
-			if err := savePost(c, blog, &item.Post); err != nil {
+			dirName, err := savePost(c, blog, &item.Post)
+			if err != nil {
 				c.Log.Printf("  error: %v", err)
 				continue
 			}
-			st.Add(item.Post.ID, postStateEntry(&item.Post, item.DirName))
+			st.Add(item.Post.ID, postStateEntry(&item.Post, dirName))
 			if err := st.Save(); err != nil {
 				c.Log.Printf("  warning: failed to save state: %v", err)
 			}
@@ -598,39 +697,87 @@ func checkMissingFiles(entry state.PostEntry, dir string) string {
 	return strings.Join(missing, ", ")
 }
 
-// checkVideoSizes fetches the full post to get fresh video URLs,
-// then does HEAD requests to compare Content-Length with local file size.
+// checkVideoSizes validates local video files against remote for a post.
+// Skips posts with no native video (ok_video) — nothing to verify. Otherwise
+// fetches fresh video URLs and does authenticated HEAD requests, collecting
+// all mismatches rather than bailing on the first one.
 func checkVideoSizes(c *boosty.Client, blog string, post *boosty.Post, dir string) string {
+	if !hasOkVideo(post.Data) {
+		return ""
+	}
+
 	var fullPost boosty.Post
 	if err := c.GetJSON(boosty.PostURL(blog, post.ID), &fullPost); err != nil {
+		c.Log.Printf("  check-media %s: fetch failed: %v", post.ID, err)
 		return ""
 	}
 
 	parsed := parser.ParseBlocks(fullPost.Data)
+	var issues []string
 	for _, m := range parsed.Media {
 		if m.Type != "video" {
 			continue
 		}
-		localPath := filepath.Join(dir, m.Filename)
-		localInfo, err := os.Stat(localPath)
-		if err != nil {
-			return fmt.Sprintf("%s missing", m.Filename)
+		if issue := checkRemoteVideoSize(c.HTTP, boosty.UserAgent, c.Log,
+			m.URL, filepath.Join(dir, m.Filename), m.Filename); issue != "" {
+			issues = append(issues, issue)
 		}
+	}
+	return strings.Join(issues, "; ")
+}
 
-		resp, err := http.Head(m.URL)
-		if err != nil {
-			continue
+// hasOkVideo reports whether any block is a native (ok_video) video.
+func hasOkVideo(blocks []boosty.ContentBlock) bool {
+	for _, b := range blocks {
+		if b.Type == "ok_video" {
+			return true
 		}
-		resp.Body.Close()
+	}
+	return false
+}
 
-		remoteSize := resp.ContentLength
-		if remoteSize > 0 && localInfo.Size() != remoteSize {
-			return fmt.Sprintf("%s: local %s vs remote %s",
-				m.Filename,
-				boosty.FormatSize(localInfo.Size()),
-				boosty.FormatSize(remoteSize),
-			)
-		}
+// checkRemoteVideoSize compares local file size with the server's Content-Length
+// obtained via HEAD. The okcdn signed URLs bind to the UA used to fetch them, so
+// we must reuse the client's User-Agent.
+//
+// Returns a descriptive issue string on real mismatches (missing local, non-200,
+// size differs). Transient problems (network error, missing Content-Length) are
+// logged and return empty — they are not treated as mismatches to avoid flagging
+// every post when the network is flaky.
+func checkRemoteVideoSize(httpc *http.Client, ua string, log boosty.Logger,
+	url, localPath, filename string) string {
+	localInfo, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Sprintf("%s missing", filename)
+	}
+
+	req, err := http.NewRequest("HEAD", url, nil)
+	if err != nil {
+		log.Printf("  check-media %s: build request: %v", filename, err)
+		return ""
+	}
+	req.Header.Set("User-Agent", ua)
+
+	resp, err := httpc.Do(req)
+	if err != nil {
+		log.Printf("  check-media %s: HEAD error: %v", filename, err)
+		return ""
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("%s: HEAD %d", filename, resp.StatusCode)
+	}
+	if resp.ContentLength <= 0 {
+		log.Printf("  check-media %s: no Content-Length", filename)
+		return ""
+	}
+	if localInfo.Size() != resp.ContentLength {
+		return fmt.Sprintf("%s: local %s vs remote %s",
+			filename,
+			boosty.FormatSize(localInfo.Size()),
+			boosty.FormatSize(resp.ContentLength),
+		)
 	}
 	return ""
 }

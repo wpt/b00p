@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -45,13 +46,37 @@ func LoadTokens(path string) (*Tokens, error) {
 	return &tokens, nil
 }
 
-// SaveTokens writes tokens to a JSON file.
+// SaveTokens writes tokens to a JSON file atomically (temp + rename), so an
+// interrupted write cannot truncate an existing auth.json.
 func (t *Tokens) SaveTokens(path string) error {
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal tokens: %w", err)
 	}
-	return os.WriteFile(path, data, 0600)
+
+	dir, name := filepath.Split(path)
+	tmp, err := os.CreateTemp(dir, name+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // Refresh obtains a new access token using the refresh token.

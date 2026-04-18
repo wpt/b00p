@@ -134,7 +134,14 @@ var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧
 
 func (c *Client) downloadOnce(url, path string) error {
 	dlClient := &http.Client{}
-	resp, err := dlClient.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", url, err)
+	}
+	// okcdn signed URLs bind to the User-Agent used when obtaining them (see
+	// srcAg=... in the URL). Reuse the client UA or the server returns 400.
+	req.Header.Set("User-Agent", UserAgent)
+	resp, err := dlClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}

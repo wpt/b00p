@@ -38,7 +38,7 @@ Paste your tokens:
 
 > Tokens auto-refresh on 401. `auth.json` is in `.gitignore`.
 
-4. Run:
+5. Run:
 
 ```bash
 # Blog statistics
