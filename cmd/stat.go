@@ -19,7 +19,11 @@ var statCmd = &cobra.Command{
 
 func init() {
 	statCmd.Flags().StringVar(&statBlog, "blog", "", "blog name")
-	statCmd.MarkFlagRequired("blog")
+	if err := statCmd.MarkFlagRequired("blog"); err != nil {
+		// Only fails if the flag does not exist; would be a programming
+		// error, so panic during init rather than silently ignoring it.
+		panic(fmt.Sprintf("MarkFlagRequired(blog): %v", err))
+	}
 	rootCmd.AddCommand(statCmd)
 }
 
