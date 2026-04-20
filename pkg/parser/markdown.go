@@ -2,34 +2,47 @@ package parser
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
 )
 
+// yamlString returns a YAML-safe double-quoted scalar for the given value.
+// strconv.Quote produces a Go-syntax string with C-style escapes for
+// control chars, embedded quotes, and backslashes — all of which YAML's
+// double-quoted style accepts. Used for any frontmatter value that could
+// legitimately contain `:`, `,`, `[`, `]`, newlines, or quotes.
+func yamlString(s string) string {
+	return strconv.Quote(s)
+}
+
 // GenerateMarkdown creates a markdown representation of a post.
 func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 	var b strings.Builder
 
-	// Frontmatter
+	// Frontmatter — every user-supplied value is double-quoted so
+	// titles/tiers/tags containing `:`, `,`, `[`, `]`, or newlines do not
+	// produce invalid YAML.
 	b.WriteString("---\n")
-	b.WriteString(fmt.Sprintf("title: %q\n", post.Title))
+	b.WriteString(fmt.Sprintf("title: %s\n", yamlString(post.Title)))
 	b.WriteString(fmt.Sprintf("date: %s\n", time.Unix(post.PublishTime, 0).Format("2006-01-02")))
-	b.WriteString(fmt.Sprintf("author: %s\n", post.User.Name))
-	b.WriteString(fmt.Sprintf("url: https://boosty.to/%s/posts/%s\n", post.User.BlogURL, post.ID))
+	b.WriteString(fmt.Sprintf("author: %s\n", yamlString(post.User.Name)))
+	b.WriteString(fmt.Sprintf("url: %s\n",
+		yamlString(fmt.Sprintf("https://boosty.to/%s/posts/%s", post.User.BlogURL, post.ID))))
 	if len(post.Tags) > 0 {
-		tags := make([]string, len(post.Tags))
+		quoted := make([]string, len(post.Tags))
 		for i, t := range post.Tags {
-			tags[i] = t.Title
+			quoted[i] = yamlString(t.Title)
 		}
-		b.WriteString(fmt.Sprintf("tags: [%s]\n", strings.Join(tags, ", ")))
+		b.WriteString(fmt.Sprintf("tags: [%s]\n", strings.Join(quoted, ", ")))
 	}
 	if post.Price > 0 {
 		b.WriteString(fmt.Sprintf("price: %d\n", post.Price))
 	}
 	if post.SubscriptionLevel != nil && post.SubscriptionLevel.Name != "" {
-		b.WriteString(fmt.Sprintf("tier: %s\n", post.SubscriptionLevel.Name))
+		b.WriteString(fmt.Sprintf("tier: %s\n", yamlString(post.SubscriptionLevel.Name)))
 	}
 	b.WriteString("---\n\n")
 
