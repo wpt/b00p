@@ -3,6 +3,7 @@ package parser
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 
@@ -22,8 +23,11 @@ type ParsedContent struct {
 	Media     []MediaItem
 }
 
-// MP4QualityRank defines preference order for direct MP4 formats (higher = better).
-var MP4QualityRank = map[string]int{
+// mp4QualityRank defines preference order for direct MP4 formats
+// (higher = better). Unexported so library callers cannot mutate parser
+// behavior globally; if external customisation is ever needed it should be
+// a function option, not a public mutable map.
+var mp4QualityRank = map[string]int{
 	"lowest":   0,
 	"tiny":     1,
 	"low":      2,
@@ -72,31 +76,28 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 
 		case "image":
 			imgIdx++
-			url := block.URL
-			if url == "" {
+			imgURL := block.URL
+			if imgURL == "" {
 				continue
 			}
-			ext := path.Ext(url)
-			if ext == "" || len(ext) > 5 {
-				ext = ".jpg"
-			}
+			ext := imageExt(imgURL)
 			filename := fmt.Sprintf("image_%03d%s", imgIdx, ext)
 			result.Media = append(result.Media, MediaItem{
 				Type:     "image",
-				URL:      url,
+				URL:      imgURL,
 				Filename: filename,
 			})
 
 		case "ok_video":
 			vidIdx++
-			url := BestMP4URL(block.PlayerURLs)
-			if url == "" {
+			vidURL := BestMP4URL(block.PlayerURLs)
+			if vidURL == "" {
 				continue
 			}
 			filename := fmt.Sprintf("video_%03d.mp4", vidIdx)
 			result.Media = append(result.Media, MediaItem{
 				Type:     "video",
-				URL:      url,
+				URL:      vidURL,
 				Filename: filename,
 			})
 
@@ -124,16 +125,34 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 	return result
 }
 
+// imageExt picks an extension for a downloaded image. Boosty image URLs are
+// signed, so naive path.Ext("...png?sig=...") returns ".png?sig=..." (too long
+// to be a real extension) and the previous code fell back to ".jpg" for every
+// signed URL. Strip query/fragment first, then fall back to ".jpg" only on
+// genuinely missing or implausible extensions.
+func imageExt(s string) string {
+	if u, err := url.Parse(s); err == nil && u.Path != "" {
+		s = u.Path
+	}
+	ext := path.Ext(s)
+	if ext == "" || len(ext) > 5 {
+		return ".jpg"
+	}
+	return strings.ToLower(ext)
+}
+
 // BestMP4URL selects the highest quality direct MP4 URL from player URLs.
+// bestRank starts at -1 so the lowest-rank "lowest" URL (rank 0) is selectable
+// when nothing better is available.
 func BestMP4URL(urls []boosty.PlayerURL) string {
 	var best string
-	var bestRank int
+	bestRank := -1
 
 	for _, u := range urls {
 		if u.URL == "" {
 			continue
 		}
-		rank, ok := MP4QualityRank[u.Type]
+		rank, ok := mp4QualityRank[u.Type]
 		if ok && rank > bestRank {
 			best = u.URL
 			bestRank = rank

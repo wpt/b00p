@@ -75,6 +75,33 @@ func TestBestMP4URL_AllEmpty(t *testing.T) {
 	}
 }
 
+// Regression: previously `bestRank` was initialised to 0 and the selection
+// guard was `rank > bestRank`, so a "lowest"-only post (rank 0) was dropped
+// and BestMP4URL returned "" instead of the only valid URL.
+func TestBestMP4URL_OnlyLowest(t *testing.T) {
+	urls := []boosty.PlayerURL{
+		{Type: "lowest", URL: "https://example.com/lowest.mp4"},
+	}
+	got := BestMP4URL(urls)
+	if got != "https://example.com/lowest.mp4" {
+		t.Errorf("BestMP4URL(only lowest) = %q, want lowest URL", got)
+	}
+}
+
+// Regression: with bestRank starting at -1, a "lowest" + "tiny" pair must
+// still pick "tiny" — the highest-ranked entry wins, no matter where the
+// floor was.
+func TestBestMP4URL_LowestVsTiny(t *testing.T) {
+	urls := []boosty.PlayerURL{
+		{Type: "lowest", URL: "https://example.com/lowest.mp4"},
+		{Type: "tiny", URL: "https://example.com/tiny.mp4"},
+	}
+	got := BestMP4URL(urls)
+	if got != "https://example.com/tiny.mp4" {
+		t.Errorf("BestMP4URL = %q, want tiny URL", got)
+	}
+}
+
 func TestBestMP4URL_UnknownTypes(t *testing.T) {
 	urls := []boosty.PlayerURL{
 		{Type: "hls", URL: "https://example.com/video.m3u8"},
@@ -157,5 +184,22 @@ func TestParseBlocks_ImageExtension(t *testing.T) {
 	}
 	if result.Media[1].Filename != "image_002.jpg" {
 		t.Errorf("Media[1].Filename = %q, want image_002.jpg (default ext)", result.Media[1].Filename)
+	}
+}
+
+// Regression: Boosty image URLs are signed, so path.Ext on the full URL
+// returned ".png?sig=..." (>5 chars) and the default ".jpg" was used for
+// every signed PNG. After fix, the query string is stripped before Ext.
+func TestParseBlocks_ImageExtensionWithQueryString(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "image", URL: "https://images.boosty.to/image/abc.png?sig=deadbeef&t=1234"},
+		{Type: "image", URL: "https://images.boosty.to/image/abc.JPEG?x=1"},
+	}
+	result := ParseBlocks(blocks)
+	if result.Media[0].Filename != "image_001.png" {
+		t.Errorf("Media[0].Filename = %q, want image_001.png (query stripped)", result.Media[0].Filename)
+	}
+	if result.Media[1].Filename != "image_002.jpeg" {
+		t.Errorf("Media[1].Filename = %q, want image_002.jpeg (lowercase, query stripped)", result.Media[1].Filename)
 	}
 }
