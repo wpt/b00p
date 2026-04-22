@@ -2,6 +2,9 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -31,9 +34,16 @@ type State struct {
 	path     string
 }
 
-// Load reads the state file from the given directory.
-// Returns an empty state if the file doesn't exist or is invalid.
-func Load(dir string) *State {
+// Load reads the state file from the given directory. A missing state file
+// is reported as a fresh, empty state (nil error). Read or parse errors are
+// returned so callers can refuse to overwrite a partially-recoverable
+// `_state.json` with a freshly-initialised one — which would discard every
+// previously tracked post.
+//
+// The Posts map is always non-nil on a successful return so callers can use
+// it directly. The JSON nil-check after Unmarshal is intentional and
+// documented in AGENTS.md.
+func Load(dir string) (*State, error) {
 	s := &State{
 		Posts: make(map[string]PostEntry),
 		path:  filepath.Join(dir, FileName),
@@ -41,16 +51,18 @@ func Load(dir string) *State {
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
-		return s
+		if errors.Is(err, fs.ErrNotExist) {
+			return s, nil
+		}
+		return nil, fmt.Errorf("read state file %s: %w", s.path, err)
 	}
 	if err := json.Unmarshal(data, s); err != nil {
-		s.Posts = make(map[string]PostEntry)
-		return s
+		return nil, fmt.Errorf("parse state file %s: %w", s.path, err)
 	}
 	if s.Posts == nil {
 		s.Posts = make(map[string]PostEntry)
 	}
-	return s
+	return s, nil
 }
 
 // Has reports whether a post ID exists in the state.

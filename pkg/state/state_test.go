@@ -111,7 +111,10 @@ func TestState_SaveAndLoad(t *testing.T) {
 		t.Fatalf("state file not created: %v", err)
 	}
 
-	loaded := Load(dir)
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
 	if loaded.Count() != 2 {
 		t.Fatalf("loaded Count() = %d, want 2", loaded.Count())
 	}
@@ -132,7 +135,10 @@ func TestState_SaveAndLoad(t *testing.T) {
 
 func TestState_LoadNonExistent(t *testing.T) {
 	dir := t.TempDir()
-	s := Load(filepath.Join(dir, "nonexistent"))
+	s, err := Load(filepath.Join(dir, "nonexistent"))
+	if err != nil {
+		t.Fatalf("Load(nonexistent) error: %v", err)
+	}
 	if s.Count() != 0 {
 		t.Errorf("Count() = %d, want 0 for non-existent dir", s.Count())
 	}
@@ -143,11 +149,16 @@ func TestState_LoadNonExistent(t *testing.T) {
 
 func TestState_LoadCorrupted(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, FileName), []byte("not json"), 0644)
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("not json"), 0644); err != nil {
+		t.Fatalf("setup write failed: %v", err)
+	}
 
-	s := Load(dir)
-	if s.Count() != 0 {
-		t.Errorf("Count() = %d, want 0 for corrupted file", s.Count())
+	s, err := Load(dir)
+	if err == nil {
+		t.Fatalf("Load(corrupted) error = nil, want non-nil; got state=%+v", s)
+	}
+	if s != nil {
+		t.Errorf("Load(corrupted) state = %+v, want nil", s)
 	}
 }
 
