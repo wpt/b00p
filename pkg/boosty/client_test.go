@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,9 +114,10 @@ func TestDownloadFile_Success(t *testing.T) {
 	defer server.Close()
 
 	c := &Client{
-		Tokens: &Tokens{AccessToken: "test"},
-		HTTP:   server.Client(),
-		Log:    discardLogger{},
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
 	}
 
 	dir := t.TempDir()
@@ -141,9 +143,10 @@ func TestDownloadFile_SkipsExistingFile(t *testing.T) {
 	defer server.Close()
 
 	c := &Client{
-		Tokens: &Tokens{AccessToken: "test"},
-		HTTP:   server.Client(),
-		Log:    discardLogger{},
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
 	}
 
 	dir := t.TempDir()
@@ -173,9 +176,10 @@ func TestDownloadFile_RedownloadsZeroByteFile(t *testing.T) {
 	defer server.Close()
 
 	c := &Client{
-		Tokens: &Tokens{AccessToken: "test"},
-		HTTP:   server.Client(),
-		Log:    discardLogger{},
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
 	}
 
 	dir := t.TempDir()
@@ -190,6 +194,22 @@ func TestDownloadFile_RedownloadsZeroByteFile(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if string(data) != content {
 		t.Errorf("file content = %q, want %q", string(data), content)
+	}
+}
+
+// CommentsURL must include reply_limit so the server inlines replies. Without
+// the param the server returns replies.data=[] regardless of replyCount, which
+// silently dropped every reply body before this fix.
+func TestCommentsURL_IncludesReplyLimit(t *testing.T) {
+	got := CommentsURL("someblog", "post-id-123", 50, 0)
+	if !strings.Contains(got, "reply_limit=100") {
+		t.Errorf("CommentsURL = %q, missing reply_limit=100", got)
+	}
+	if !strings.Contains(got, "limit=50") {
+		t.Errorf("CommentsURL = %q, missing limit=50", got)
+	}
+	if !strings.Contains(got, "offset=0") {
+		t.Errorf("CommentsURL = %q, missing offset=0", got)
 	}
 }
 
