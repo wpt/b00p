@@ -103,3 +103,39 @@ func TestTokens_SaveAndLoad(t *testing.T) {
 		t.Errorf("Round-trip failed: %+v", loaded)
 	}
 }
+
+// Regression: the previous SaveTokens passed dir="" to os.CreateTemp when
+// path was a bare filename like "auth.json", which silently used os.TempDir
+// and made the "atomic rename" cross-filesystem. This test runs the save
+// from inside a temp working directory using a bare filename to ensure the
+// temp file lands in the same directory.
+func TestTokens_SaveTokens_BareFilename(t *testing.T) {
+	dir := t.TempDir()
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%s): %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(prevWD); err != nil {
+			t.Logf("restore cwd: %v", err)
+		}
+	})
+
+	tok := &Tokens{AccessToken: "a", RefreshToken: "r"}
+	if err := tok.SaveTokens("auth.json"); err != nil {
+		t.Fatalf("SaveTokens(bare): %v", err)
+	}
+
+	// File must exist in cwd.
+	if _, err := os.Stat(filepath.Join(dir, "auth.json")); err != nil {
+		t.Fatalf("expected auth.json in cwd: %v", err)
+	}
+
+	loaded, err := LoadTokens(filepath.Join(dir, "auth.json"))
+	if err != nil || loaded.AccessToken != "a" {
+		t.Errorf("round-trip mismatch: %+v err=%v", loaded, err)
+	}
+}

@@ -55,6 +55,12 @@ func (t *Tokens) SaveTokens(path string) error {
 	}
 
 	dir, name := filepath.Split(path)
+	// filepath.Split("auth.json") returns dir="", which os.CreateTemp would
+	// resolve to os.TempDir(); the rename then crosses filesystems and stops
+	// being atomic. Force "." so the temp file lives next to the destination.
+	if dir == "" {
+		dir = "."
+	}
 	tmp, err := os.CreateTemp(dir, name+".tmp-*")
 	if err != nil {
 		return err
@@ -91,6 +97,10 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 		return fmt.Errorf("create refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// /oauth/token/ sits behind the same edge as the API and rejects naked
+	// (no UA) requests as bots; mirror what rawRequest sends on every other
+	// call so refresh does not become the one bot-flagged endpoint.
+	req.Header.Set("User-Agent", UserAgent)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
