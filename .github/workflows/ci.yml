@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,4 +18,37 @@ jobs:
         with:
           go-version: "1.26"
       - run: go vet ./...
-      - run: go test ./... -v
+      - name: Run tests with coverage
+        run: go test ./... -coverprofile=coverage.out -covermode=atomic
+      - name: Compute coverage percentage
+        id: cov
+        run: |
+          PCT=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+          echo "Coverage: ${PCT}%"
+      - name: Stage coverage badge JSON
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        run: |
+          mkdir -p .pages
+          PCT="${{ steps.cov.outputs.pct }}"
+          # shields.io endpoint schema: https://shields.io/endpoint
+          # Color thresholds: <50 red, <70 yellow, <85 yellowgreen, <95 green, else brightgreen.
+          awk -v pct="$PCT" 'BEGIN {
+            color = "brightgreen"
+            if (pct+0 < 50) color = "red"
+            else if (pct+0 < 70) color = "yellow"
+            else if (pct+0 < 85) color = "yellowgreen"
+            else if (pct+0 < 95) color = "green"
+            printf "{\"schemaVersion\":1,\"label\":\"coverage\",\"message\":\"%.1f%%\",\"color\":\"%s\"}\n", pct, color
+          }' > .pages/coverage.json
+          cat .pages/coverage.json
+      - name: Publish coverage badge to gh-pages
+        if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./.pages
+          publish_branch: gh-pages
+          keep_files: true
+          enable_jekyll: false
+          commit_message: "chore(ci): update coverage badge"
