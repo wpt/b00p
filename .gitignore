@@ -6,6 +6,13 @@ b00p
 b00p_*
 *.exe
 
+# coverage
+cov
+cov.out
+coverage.out
+coverage.html
+.pages/
+
 # IDE
 .idea/
 .vscode/
