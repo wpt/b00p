@@ -18,6 +18,16 @@ jobs:
         with:
           go-version: "1.26.3"
       - run: go vet ./...
+      - name: staticcheck
+        # 2024.1.x pulls an x/tools that fails to compile on Go 1.26
+        # ("invalid array length -delta*delta" in tokeninternal). 2025.1.1
+        # is the first release that builds cleanly on 1.26 — bump
+        # intentionally if a newer Go version requires it.
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+      - name: govulncheck
+        # v1.1.x and v1.2.x share the same x/tools break on Go 1.26.
+        # v1.3.0 is the first version that compiles cleanly.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
       - name: Run tests with coverage
         run: go test ./... -coverprofile=coverage.out -covermode=atomic
       - name: Compute coverage percentage
