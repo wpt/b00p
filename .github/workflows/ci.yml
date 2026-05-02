@@ -28,8 +28,8 @@ jobs:
         # v1.1.x and v1.2.x share the same x/tools break on Go 1.26.
         # v1.3.0 is the first version that compiles cleanly.
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
-      - name: Run tests with coverage
-        run: go test ./... -coverprofile=coverage.out -covermode=atomic
+      - name: Run tests with coverage and race detector
+        run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
       - name: Compute coverage percentage
         id: cov
         run: |
