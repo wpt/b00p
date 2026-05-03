@@ -52,8 +52,27 @@ jobs:
             printf "{\"schemaVersion\":1,\"label\":\"coverage\",\"message\":\"%.1f%%\",\"color\":\"%s\"}\n", pct, color
           }' > .pages/coverage.json
           cat .pages/coverage.json
-      - name: Publish coverage badge to gh-pages
+      - name: Upload coverage badge artifact
         if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-badge
+          path: .pages/coverage.json
+          retention-days: 1
+
+  publish-coverage:
+    needs: test
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download coverage badge artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-badge
+          path: .pages
+      - name: Publish coverage badge to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
