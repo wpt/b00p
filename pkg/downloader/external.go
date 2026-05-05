@@ -41,7 +41,10 @@ func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) e
 		// cmd.Dir is set to `dir`, so the -o template is relative to that
 		// directory. Including `dir` in the template too would nest the path
 		// (output/blog/post/output/blog/post/file.mp4) when dir is relative.
-		cmd := exec.Command(ytdlp, "-o", m.Filename+".%(ext)s", m.URL)
+		// `--` stops yt-dlp from interpreting a URL that begins with `-` as a
+		// flag (e.g. `--exec=...`), which would otherwise let a hostile post
+		// smuggle arbitrary args through the embed.
+		cmd := exec.Command(ytdlp, "-o", m.Filename+".%(ext)s", "--", m.URL)
 		cmd.Dir = dir
 		output, err := cmd.CombinedOutput()
 		if err != nil {
