@@ -51,6 +51,13 @@ type Logger interface {
 }
 
 // ProgressLogger extends Logger with support for in-place progress updates.
+//
+// Implementations MUST be safe for concurrent calls to Printf, Progress, and
+// ClearProgress from multiple goroutines. The client invokes Progress from
+// download workers (--workers > 1) while Printf may fire from the orchestrator
+// at the same time; without internal synchronization the spinner line and a
+// log line race and produce garbled output (or, worse, data races on a
+// `hasProgress`-style flag). See cmd/log.go for a reference implementation.
 type ProgressLogger interface {
 	Logger
 	// Progress writes a line that will be overwritten by the next Progress call.
