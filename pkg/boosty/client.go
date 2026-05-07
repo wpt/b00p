@@ -154,7 +154,6 @@ func (c *Client) DownloadFile(url, path string) error {
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			c.waitRetry("download retry", attempt)
-			os.Remove(path) // clean up partial file
 		}
 
 		err := c.downloadOnce(url, path)
@@ -163,7 +162,6 @@ func (c *Client) DownloadFile(url, path string) error {
 		}
 		lastErr = err
 	}
-	os.Remove(path) // clean up on final failure
 	return fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
 }
 
@@ -187,9 +185,26 @@ func (c *Client) downloadOnce(url, path string) error {
 		return fmt.Errorf("download %s: status %d", url, resp.StatusCode)
 	}
 
-	f, err := os.Create(path)
+	// Write to <path>.tmp and rename on success. A SIGKILL/power-loss mid-copy
+	// leaves a .tmp orphan instead of poisoning the final path: next run sees
+	// the final path missing and re-downloads, while os.Create on the same
+	// .tmp path overwrites the stale partial.
+	//
+	// Invariants this relies on:
+	//   - path and path+".tmp" live on the same filesystem. os.Rename across
+	//     filesystems returns EXDEV on Linux/macOS and ERROR_NOT_SAME_DEVICE
+	//     on Windows; all current callers keep media under the same blog dir
+	//     as the destination, so this holds. A future caller that puts the
+	//     tmp staging area on a different mount must implement copy+remove.
+	//   - No two goroutines target the same `path` concurrently. The syncer
+	//     dirReserver gives each post a unique directory and DownloadMedia
+	//     emits unique filenames per media slot, so concurrent workers do
+	//     not race on the .tmp suffix. Direct callers outside the syncer
+	//     must enforce this themselves.
+	tmpPath := path + ".tmp"
+	f, err := os.Create(tmpPath)
 	if err != nil {
-		return fmt.Errorf("create file %s: %w", path, err)
+		return fmt.Errorf("create file %s: %w", tmpPath, err)
 	}
 
 	totalSize := resp.ContentLength
@@ -211,12 +226,18 @@ func (c *Client) downloadOnce(url, path string) error {
 		plog.ClearProgress()
 	}
 	if copyErr != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("write %s: %w", path, copyErr)
 	}
 	// Close errors surface delayed write/flush failures. Without this check a
 	// truncated download could be reported as a successful download.
 	if closeErr != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("close %s: %w", path, closeErr)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
 	}
 
 	c.Log.Printf("  downloaded %s (%s)", filename, FormatSize(pw.written))
