@@ -13,18 +13,6 @@ import (
 	"time"
 )
 
-func testClient(handler http.Handler) *Client {
-	server := httptest.NewServer(handler)
-	return &Client{
-		Tokens: &Tokens{
-			AccessToken: "test-token",
-			ExpiresAt:   time.Now().Add(time.Hour).UnixMilli(),
-		},
-		HTTP: server.Client(),
-		Log:  discardLogger{},
-	}
-}
-
 func TestGetJSON_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
@@ -194,6 +182,142 @@ func TestDownloadFile_RedownloadsZeroByteFile(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if string(data) != content {
 		t.Errorf("file content = %q, want %q", string(data), content)
+	}
+}
+
+// downloadOnce must write to <path>.tmp and rename on success so a crash mid-copy
+// cannot poison the final path. These tests pin that contract: a regression that
+// removes the rename or skips the .tmp cleanup will fail here.
+
+func TestDownloadOnce_SuccessLeavesNoTmp(t *testing.T) {
+	content := "successful download payload"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, content)
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	if err := c.downloadOnce(server.URL+"/file", path); err != nil {
+		t.Fatalf("downloadOnce error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+	if string(data) != content {
+		t.Errorf("file content = %q, want %q", string(data), content)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("expected %s.tmp to be absent after success, stat err = %v", path, err)
+	}
+}
+
+func TestDownloadOnce_MidStreamFailureLeavesNoFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Advertise a content length far larger than what is actually written,
+		// then hijack and close the connection. io.Copy sees ErrUnexpectedEOF
+		// and downloadOnce takes the copy-error branch.
+		w.Header().Set("Content-Length", "1000000")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("partial"))
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("server does not support hijacking")
+		}
+		conn, _, _ := hj.Hijack()
+		conn.Close()
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	err := c.downloadOnce(server.URL+"/file", path)
+	if err == nil {
+		t.Fatal("downloadOnce should fail on mid-stream connection drop")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected %s to be absent (no half-written file), stat err = %v", path, err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("expected %s.tmp to be cleaned up after copy error, stat err = %v", path, err)
+	}
+}
+
+func TestDownloadOnce_HTTPErrorLeavesNoTmp(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	err := c.downloadOnce(server.URL+"/file", path)
+	if err == nil {
+		t.Fatal("downloadOnce should fail on 403")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected %s to be absent, stat err = %v", path, err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("expected %s.tmp to be absent (created lazily after status check), stat err = %v", path, err)
+	}
+}
+
+// TestDownloadOnce_OverwritesStaleTmp ensures a leftover .tmp from a previous
+// crashed run is overwritten rather than appended to, so the bytes on disk
+// after a successful retry match the server response exactly.
+func TestDownloadOnce_OverwritesStaleTmp(t *testing.T) {
+	content := "fresh payload"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, content)
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(path+".tmp", []byte("stale partial bytes from prior crash"), 0644); err != nil {
+		t.Fatalf("seed stale .tmp: %v", err)
+	}
+
+	if err := c.downloadOnce(server.URL+"/file", path); err != nil {
+		t.Fatalf("downloadOnce error: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != content {
+		t.Errorf("file content = %q, want %q (stale bytes from .tmp leaked into final path)", string(data), content)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("expected %s.tmp to be absent after success, stat err = %v", path, err)
 	}
 }
 
