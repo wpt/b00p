@@ -106,3 +106,31 @@ func TestFormatDirName_TrailingDots(t *testing.T) {
 		t.Errorf("FormatDirName = %q, want trailing dots trimmed", got)
 	}
 }
+
+func TestFormatDirName_LeadingDots(t *testing.T) {
+	cases := []struct {
+		name      string
+		title     string
+		wantIsID  bool
+		wantValue string
+	}{
+		{"double_dot", "..", true, ""},
+		{"leading_dot", ".hidden", false, "hidden"},
+		{"dot_dot_title", "..title", false, "title"},
+		{"mixed_leading", ". . Real Title", false, "Real Title"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatDirName("{title}", tc.title, 0, "fallback-id")
+			if tc.wantIsID {
+				if got != "fallback-id" {
+					t.Errorf("FormatDirName(%q) = %q, want fallback-id", tc.title, got)
+				}
+				return
+			}
+			if got != tc.wantValue {
+				t.Errorf("FormatDirName(%q) = %q, want %q", tc.title, got, tc.wantValue)
+			}
+		})
+	}
+}

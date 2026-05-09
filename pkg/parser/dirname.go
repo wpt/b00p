@@ -38,8 +38,10 @@ func FormatDirName(format string, title string, publishTime int64, postID string
 		}
 	})
 
-	// Trim trailing dots and spaces (Windows FS limitation)
+	// Trim trailing dots and spaces (Windows FS limitation), then strip any
+	// leading dots so the formatted name isn't ".." or a hidden dotfile.
 	result = strings.TrimRight(result, ". ")
+	result = strings.TrimLeft(result, ". ")
 	if result == "" {
 		result = postID
 	}
