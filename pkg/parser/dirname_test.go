@@ -107,29 +107,71 @@ func TestFormatDirName_TrailingDots(t *testing.T) {
 	}
 }
 
+// Leading dots must be stripped — otherwise a title like ".." sanitize-survives
+// (no unsafe chars, not empty) and collides with the parent directory entry.
 func TestFormatDirName_LeadingDots(t *testing.T) {
-	cases := []struct {
-		name      string
-		title     string
-		wantIsID  bool
-		wantValue string
+	tests := []struct {
+		name  string
+		title string
+		want  string
 	}{
-		{"double_dot", "..", true, ""},
-		{"leading_dot", ".hidden", false, "hidden"},
-		{"dot_dot_title", "..title", false, "title"},
-		{"mixed_leading", ". . Real Title", false, "Real Title"},
+		{"double dot", "..", "fallback-id"},
+		{"leading dot", ".hidden", "hidden"},
+		{"dot dot title", "..title", "title"},
+		{"mixed leading", ". . Real Title", "Real Title"},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := FormatDirName("{title}", tc.title, 0, "fallback-id")
-			if tc.wantIsID {
-				if got != "fallback-id" {
-					t.Errorf("FormatDirName(%q) = %q, want fallback-id", tc.title, got)
-				}
-				return
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatDirName("{title}", tt.title, 0, "fallback-id")
+			if got != tt.want {
+				t.Errorf("FormatDirName(%q) = %q, want %q", tt.title, got, tt.want)
 			}
-			if got != tc.wantValue {
-				t.Errorf("FormatDirName(%q) = %q, want %q", tc.title, got, tc.wantValue)
+		})
+	}
+}
+
+// Windows reserved device names (CON, PRN, COM1..9, LPT1..9, etc.) must fall
+// back to the post ID — creating a directory with one of these on Windows
+// fails or yields an unopenable handle, even via SMB from a non-Windows host.
+func TestFormatDirName_WindowsReservedNames(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+	}{
+		{"con", "CON"},
+		{"con lowercase", "con"},
+		{"prn with extension", "prn.txt"},
+		{"com1", "COM1"},
+		{"lpt9", "lpt9"},
+		{"nul", "NUL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatDirName("{title}", tt.title, 0, "fallback-id")
+			if got != "fallback-id" {
+				t.Errorf("FormatDirName(%q) = %q, want 'fallback-id'", tt.title, got)
+			}
+		})
+	}
+}
+
+func TestFormatDirName_NonReservedSimilarNames(t *testing.T) {
+	// Names that look reserved but are not — must NOT fall back to ID.
+	tests := []struct {
+		name  string
+		title string
+		want  string
+	}{
+		{"console", "Console", "Console"},
+		{"com10", "COM10", "COM10"},
+		{"lpt", "LPT", "LPT"},
+		{"prefix con", "configuration", "configuration"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatDirName("{title}", tt.title, 0, "fallback-id")
+			if got != tt.want {
+				t.Errorf("FormatDirName(%q) = %q, want %q", tt.title, got, tt.want)
 			}
 		})
 	}
