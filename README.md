@@ -6,7 +6,7 @@
 
 CLI parser and content downloader for [boosty.to](https://boosty.to). Downloads posts, images, native videos, comments. Also usable as a Go library.
 
-Requires Go **1.26.1+** to build from source.
+Requires Go **1.26.3+** to build from source.
 
 ## Installation
 
@@ -156,7 +156,7 @@ Sync detects:
 - **UPDATED** — author edited the post (`updatedAt` changed).
 - **COMMENTS** — comment-count drift. For posts with `hasComments=true`, the on-disk count (top-level + inlined replies in `comments.json`) is compared to the API count, with disk reality winning over the cached state count. If `comments.json` is missing or unreadable, any non-zero API count triggers a refetch. For posts with `hasComments=false`, the legacy state-vs-API count comparison is used.
 - **VIDEO_MISMATCH** — native `ok_video` discrepancy: local file is missing, the HEAD request returns non-200, or `Content-Length` differs from the local file size. Transient HEAD errors are logged and skipped. External videos (YouTube/VK/OK) are not validated. Requires `--check-media`.
-- **FILES_MISSING** — expected files absent on disk. `post.json` is always required; `comments.json` and `post.md` are required only when state says they were previously written. Requires `--check-files`.
+- **FILES_MISSING** — expected files absent on disk. `post.json` is always required; `comments.json` and `post.md` are required only when state says they were previously written. The apply phase re-fetches and rewrites whatever the check flagged; it doesn't just report. Requires `--check-files`.
 - **LOCKED** — was accessible, now locked. On-disk data is preserved; only state's `locked` flag is flipped.
 
 Multiple labels can apply to the same post — they appear in one bracket joined by commas, e.g. `[UPDATED,VIDEO_MISMATCH]`.
@@ -178,7 +178,7 @@ Multiple labels can apply to the same post — they appear in one bracket joined
 | `--check-media` | `false` | With `--sync`: validate native video sizes via HEAD |
 | `--check-files` | `false` | With `--sync`: verify expected files exist on disk |
 | `--format` | `{date}_{title}` | Post directory name format |
-| `--workers` | `1` | Concurrent post downloads |
+| `--workers` | `1` | Concurrent post downloads (also parallelises `--check-media` HEAD requests) |
 
 ## Directory Name Format
 
@@ -192,7 +192,7 @@ Variables for `--format`:
 | `{date:d.m.y}` | `13.03.2026` | y=year, m=month, d=day |
 | `{id}` | `e24c0343-...` | Post UUID |
 
-`{title}` is sanitized for Windows/POSIX filesystems: strips `\ / : * ? " < > |`, collapses whitespace, caps at 80 runes. The fully-formatted directory name is then trimmed of trailing dots and spaces (a Windows FS quirk). If formatting yields an empty string, the post ID is used. Formatted-name collisions are resolved by appending the first 8 characters of the post ID.
+`{title}` is sanitized for Windows/POSIX filesystems: strips `\ / : * ? " < > |`, collapses whitespace, caps at 80 runes. The fully-formatted directory name is then trimmed of leading/trailing dots and spaces (so `..` and `.hidden` are normalized), and the post ID is substituted whenever the result is empty or matches a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`, `LPT1..9`, case-insensitive — including extensions like `CON.txt`). Formatted-name collisions are resolved by appending the first 8 characters of the post ID.
 
 ## Output Structure
 
@@ -229,7 +229,7 @@ Locked posts are not stored — after upgrading your subscription they are downl
 ## Reliability
 
 - **Retry with backoff**: API GETs retry 3× (5s / 15s / 30s) on request-side errors (transport, token-refresh, 5xx, 429) — other 4xx responses and JSON decode failures fail fast. Media downloads retry 3× after any `downloadOnce` error (network failures, any non-200 status including 4xx, create/write/close errors), cleaning partial files between attempts. HEAD checks for `--check-media` and `yt-dlp` invocations are not retried.
-- **Atomic writes**: `_state.json`, `post.json`, `post.md`, `comments.json`, and `auth.json` (after refresh) are written via temp file + fsync + rename. This prevents truncated target files during interrupted writes; the parent directory is not fsynced, so power loss is not strongly defended against.
+- **Atomic writes**: `_state.json`, `post.json`, `post.md`, `comments.json`, and `auth.json` (after refresh) are written via temp file + fsync + rename. Media downloads use temp file + rename (no fsync, to avoid stalling multi-GB writes) — a SIGKILL or crash mid-download leaves a `.tmp` orphan that the next run overwrites instead of poisoning the final path. The parent directory is not fsynced, so power loss is not strongly defended against.
 - **Integrity check**: existing non-empty files are skipped; 0-byte partials are removed and re-downloaded.
 - **Incremental state saves**: state is written after each post, so interrupted runs resume cleanly.
 - **Comments endpoint quirks**: the server silently drops replies unless `reply_limit` is set, and `offset>0` returns `data=[]` with `isLast=true`. b00p sends `reply_limit=100` and uses `limit=100` with offset pagination — but the broken `offset=` short-circuits the iterator after the first page, so posts with >100 top-level comments would silently cap and surface as a disk-vs-API count mismatch on the next sync (a true fix would need cursor pagination, which the API doesn't appear to expose).
@@ -294,10 +294,10 @@ func main() {
 
 ```bash
 go vet ./...
-go test ./... -v
+go test ./... -race
 ```
 
-CI runs both on every push and pull request against `master`.
+CI runs `go vet`, `go test -race`, [`staticcheck`](https://staticcheck.dev/), and [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) on every push and pull request against `master`.
 
 ## License
 
