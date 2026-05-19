@@ -23,7 +23,7 @@ type Post struct {
 	PublishTime       int64              `json:"publishTime"`
 	UpdatedAt         int64              `json:"updatedAt"`
 	HasAccess         bool               `json:"hasAccess"`
-	Price             int                `json:"price"`
+	Price             float64            `json:"price"`
 	CurrencyPrices    map[string]float64 `json:"currencyPrices,omitempty"`
 	SubscriptionLevel *PostSubLevel      `json:"subscriptionLevel,omitempty"`
 	User              PostUser           `json:"user"`
@@ -37,7 +37,7 @@ type Post struct {
 type PostSubLevel struct {
 	ID             int64              `json:"id"`
 	Name           string             `json:"name"`
-	Price          int                `json:"price"`
+	Price          float64            `json:"price"`
 	CurrencyPrices map[string]float64 `json:"currencyPrices,omitempty"`
 	IsArchived     bool               `json:"isArchived"`
 }
@@ -94,7 +94,7 @@ type CommentsResponse struct {
 // Comment is a post comment.
 type Comment struct {
 	ID         string            `json:"id"`
-	AuthorID   int64             `json:"intId"`
+	IntID      int64             `json:"intId"` // the comment's own numeric id (NOT the author's — that is Author.ID)
 	Author     CommentAuthor     `json:"author"`
 	Data       []ContentBlock    `json:"data"`
 	CreatedAt  int64             `json:"createdAt"`
@@ -118,7 +118,7 @@ type SubscriptionsResponse struct {
 // Subscription is a user's subscription to a blog.
 type Subscription struct {
 	Name              string            `json:"name"`
-	Price             int               `json:"price"`
+	Price             float64           `json:"price"`
 	OnTime            int64             `json:"onTime"`
 	OffTime           int64             `json:"offTime"`
 	IsPaused          bool              `json:"isPaused"`
@@ -141,8 +141,8 @@ type BlogOwner struct {
 
 // SubscriptionLevel is a subscription tier.
 type SubscriptionLevel struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Price      int    `json:"price"`
-	IsArchived bool   `json:"isArchived"`
+	ID         int64   `json:"id"`
+	Name       string  `json:"name"`
+	Price      float64 `json:"price"`
+	IsArchived bool    `json:"isArchived"`
 }
