@@ -35,6 +35,11 @@ func (e *Engine) DownloadAll() error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
+	// state.State is not concurrency-safe (see its doc); stMu covers every
+	// Add/Save pair below so workers do not race on st.Posts. The
+	// `downloaded` counter is incremented inside the same critical section
+	// — it looks like a separate race but isn't, because every worker that
+	// touches it already holds stMu.
 	var stMu sync.Mutex
 
 	var jobs []postJob
@@ -67,38 +72,23 @@ func (e *Engine) DownloadAll() error {
 
 	c.Log.Printf("Found %d posts to download (workers: %d)", len(jobs), e.cfg.Workers)
 
-	workers := max(1, min(e.cfg.Workers, len(jobs)))
-
 	var downloaded int
-	jobCh := make(chan postJob, len(jobs))
-	for _, j := range jobs {
-		jobCh <- j
-	}
-	close(jobCh)
+	runWorkerPool(e.cfg.Workers, jobs, func(job postJob) {
+		c.Log.Printf("  [%d] %s", job.num, job.post.Title)
+		dirName, err := e.SavePost(&job.post)
+		if err != nil {
+			c.Log.Printf("  error: %v", err)
+			return
+		}
 
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Go(func() {
-			for job := range jobCh {
-				c.Log.Printf("  [%d] %s", job.num, job.post.Title)
-				dirName, err := e.SavePost(&job.post)
-				if err != nil {
-					c.Log.Printf("  error: %v", err)
-					continue
-				}
-
-				stMu.Lock()
-				st.Add(job.post.ID, e.postStateEntry(&job.post, dirName))
-				if err := st.Save(); err != nil {
-					c.Log.Printf("  warning: failed to save state: %v", err)
-				}
-				downloaded++
-				stMu.Unlock()
-			}
-		})
-	}
-
-	wg.Wait()
+		stMu.Lock()
+		defer stMu.Unlock()
+		st.Add(job.post.ID, e.postStateEntry(&job.post, dirName))
+		if err := st.Save(); err != nil {
+			c.Log.Printf("  warning: failed to save state: %v", err)
+		}
+		downloaded++
+	})
 
 	c.Log.Printf("Done. %d total, %d downloaded, %d already synced.", total, downloaded, skippedState)
 	return nil

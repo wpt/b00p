@@ -78,53 +78,135 @@ func decideApplyActions(item syncItem, cfg Config) applyActions {
 // handled independently so combined changes (e.g. edited + comments +
 // missing post.md) are all applied in a single pass instead of one of
 // them being silently skipped.
+//
+// Dispatch is split per action category so each helper has a narrow,
+// auditable contract — IsNew/JustUnlocked posts are *not* in state yet
+// (no existing entry to read from), while JustLocked and the actionable-
+// update branch require InState=true to safely read from st.Posts.
+// classifyPost enforces these invariants; the helpers re-verify them
+// defensively so a future refactor or a test breaking the contract
+// surfaces as a logged skip instead of a silently-created ghost entry.
 func (e *Engine) applyItem(blogDir string, st *state.State, item syncItem) {
-	c := e.c
 	switch {
 	case item.IsNew, item.JustUnlocked:
-		c.Log.Printf("  downloading: %s", item.Post.Title)
-		dirName, err := e.SavePost(&item.Post)
-		if err != nil {
-			c.Log.Printf("  error: %v", err)
-			return
-		}
-		st.Add(item.Post.ID, e.postStateEntry(&item.Post, dirName))
-		if err := st.Save(); err != nil {
-			c.Log.Printf("  warning: failed to save state: %v", err)
-		}
-		return
-
+		e.applyNew(st, item)
 	case item.JustLocked:
-		entry := st.Posts[item.Post.ID]
-		entry.Locked = true
-		st.Add(item.Post.ID, entry)
-		if err := st.Save(); err != nil {
-			c.Log.Printf("  warning: failed to save state: %v", err)
-		}
+		e.applyJustLocked(st, item)
+	case item.IsActionable():
+		e.applyUpdate(blogDir, st, item)
+		// default: pure backfill or no-change. applyBackfill was called in
+		// Sync before the apply loop, and its mutations are persisted by the
+		// per-item st.Save() calls in the actionable branches above — nothing
+		// left to do for this item.
+	}
+}
+
+// applyNew handles IsNew / JustUnlocked: posts without a usable prior state
+// entry. SavePost performs the full download flow; on success a fresh
+// state entry is written. No existing entry is read.
+func (e *Engine) applyNew(st *state.State, item syncItem) {
+	c := e.c
+	c.Log.Printf("  downloading: %s", item.Post.Title)
+	dirName, err := e.SavePost(&item.Post)
+	if err != nil {
+		c.Log.Printf("  error: %v", err)
 		return
 	}
+	// SavePost returns dirName="" only when !post.HasAccess. classifyPost
+	// guarantees IsNew/JustUnlocked carry HasAccess=true, so an empty
+	// dirName here is a contract violation — recording an empty DirName
+	// in state would poison future syncs (apply would join blogDir+""
+	// and operate on the blog root). Refuse to advance state.
+	if dirName == "" {
+		c.Log.Printf("  warning: SavePost returned empty dirName for accessible post %q; state not updated", item.Post.ID)
+		return
+	}
+	st.Add(item.Post.ID, e.postStateEntry(&item.Post, dirName))
+	if err := st.Save(); err != nil {
+		c.Log.Printf("  warning: failed to save state: %v", err)
+	}
+}
 
-	if !item.IsActionable() {
-		return // pure backfill or no-change; backfill already applied to st
+// applyJustLocked flips Locked=true on the existing entry. Requires
+// InState=true (enforced by classifyPost; defensively re-checked here
+// because a JustLocked with no entry would otherwise silently create one
+// with Locked=true and zero metadata).
+func (e *Engine) applyJustLocked(st *state.State, item syncItem) {
+	c := e.c
+	entry, ok := st.Get(item.Post.ID)
+	if !ok {
+		// Invariant violation: JustLocked implies InState=true. Log and skip
+		// rather than create a ghost entry with empty metadata.
+		c.Log.Printf("  warning: JustLocked on %s but no state entry; skipping", item.Post.ID)
+		return
+	}
+	entry.Locked = true
+	st.Add(item.Post.ID, entry)
+	if err := st.Save(); err != nil {
+		c.Log.Printf("  warning: failed to save state: %v", err)
+	}
+}
+
+// applyUpdate handles the actionable-update path: Edited, NewComments,
+// VideoMismatch, or any Missing.* artefact. Requires InState=true — the
+// per-artefact UpdatedAt contract reads from the existing state entry,
+// and reading a zero-valued entry would silently lose all prior metadata
+// (Title, HasMd, HasComments, etc.) on save.
+func (e *Engine) applyUpdate(blogDir string, st *state.State, item syncItem) {
+	c := e.c
+	old, ok := st.Get(item.Post.ID)
+	if !ok {
+		// Invariant violation: actionable non-new/non-unlocked items must be
+		// InState. Log and skip rather than fabricate a state entry from a
+		// freshly-fetched post — the fail-closed UpdatedAt contract depends
+		// on reading the prior entry, not a zero value.
+		c.Log.Printf("  warning: actionable update for %s but no state entry; skipping", item.Post.ID)
+		return
 	}
 
 	actions := decideApplyActions(item, e.cfg)
-
 	c.Log.Printf("  updating: %s — %s", item.Post.Title, item.Detail())
 	dir := filepath.Join(blogDir, item.DirName)
 
-	var fullPost boosty.Post
-	if actions.NeedFetch() {
-		if err := c.GetJSON(boosty.PostURL(e.cfg.Blog, item.Post.ID), &fullPost); err != nil {
-			c.Log.Printf("  error fetching post: %v", err)
-			return
-		}
-	} else {
-		fullPost = item.Post
+	fullPost, ok := e.fetchFullPost(item.Post, actions)
+	if !ok {
+		return
 	}
 
-	// Seed outcome with "not requested = OK" so unrequested artefacts do not
-	// fail-close the UpdatedAt advance.
+	out := e.runApplyActions(dir, &fullPost, item.Edited, actions)
+	entry := buildSyncEntry(old, &fullPost, item.DirName, item.Edited, out)
+	st.Add(item.Post.ID, entry)
+	if err := st.Save(); err != nil {
+		c.Log.Printf("  warning: failed to save state: %v", err)
+	}
+}
+
+// fetchFullPost returns the post to operate on. When NeedFetch is true a
+// fresh GET is performed (Edited/Media/MD changes need the latest payload,
+// including refreshed signed video URLs); otherwise the classified post is
+// used directly — comments-only updates do not need to round-trip the
+// post endpoint. Returns ok=false when the fetch fails so callers can
+// fall through without mutating disk or state.
+func (e *Engine) fetchFullPost(classified boosty.Post, actions applyActions) (boosty.Post, bool) {
+	if !actions.NeedFetch() {
+		return classified, true
+	}
+	var p boosty.Post
+	if err := e.c.GetJSON(boosty.PostURL(e.cfg.Blog, classified.ID), &p); err != nil {
+		e.c.Log.Printf("  error fetching post: %v", err)
+		return boosty.Post{}, false
+	}
+	return p, true
+}
+
+// runApplyActions executes each requested artefact write and records the
+// per-channel outcome. The outcome seeds "not requested = OK" so unrequested
+// artefacts do not fail-close the UpdatedAt advance in buildSyncEntry.
+//
+// Block parsing is only done when a downstream artefact (media or md)
+// actually consumes it; a comments-only update skips the parse cost.
+func (e *Engine) runApplyActions(dir string, fullPost *boosty.Post, edited bool, actions applyActions) applyOutcome {
+	c := e.c
 	out := applyOutcome{
 		PostJSONOK: !actions.Post,
 		MediaOK:    !actions.Media,
@@ -133,23 +215,20 @@ func (e *Engine) applyItem(blogDir string, st *state.State, item syncItem) {
 	}
 
 	if actions.Post {
-		if err := writeJSON(filepath.Join(dir, "post.json"), fullPost); err != nil {
+		if err := writeJSON(filepath.Join(dir, "post.json"), *fullPost); err != nil {
 			c.Log.Printf("  error writing post.json: %v", err)
 		} else {
 			out.PostJSONOK = true
 		}
 	}
 
-	// Only parse blocks when an artefact downstream actually consumes them —
-	// a comments-only update has no use for parsed media/text and would
-	// otherwise spend the parse cost per affected post.
 	var parsed parser.ParsedContent
 	if actions.Media || actions.MD {
 		parsed = parser.ParseBlocks(fullPost.Data)
 	}
 
 	if actions.Media {
-		if invalidateMediaForRedownload(parsed.Media, dir, item.Edited, c.Log) {
+		if invalidateMediaForRedownload(parsed.Media, dir, edited, c.Log) {
 			if err := downloader.DownloadMedia(c, parsed.Media, dir); err != nil {
 				c.Log.Printf("  error re-downloading media: %v", err)
 			} else {
@@ -159,7 +238,7 @@ func (e *Engine) applyItem(blogDir string, st *state.State, item syncItem) {
 	}
 
 	if actions.MD {
-		if err := writePostMarkdown(&fullPost, parsed, dir); err != nil {
+		if err := writePostMarkdown(fullPost, parsed, dir); err != nil {
 			c.Log.Printf("  error writing post.md: %v", err)
 		} else {
 			out.MDOK = true
@@ -168,7 +247,7 @@ func (e *Engine) applyItem(blogDir string, st *state.State, item syncItem) {
 	}
 
 	if actions.Comments {
-		if err := e.downloadComments(item.Post.ID, dir); err != nil {
+		if err := e.downloadComments(fullPost.ID, dir); err != nil {
 			c.Log.Printf("  error: %v", err)
 		} else {
 			out.CommentsOK = true
@@ -176,22 +255,26 @@ func (e *Engine) applyItem(blogDir string, st *state.State, item syncItem) {
 		}
 	}
 
-	entry := buildSyncEntry(st.Posts[item.Post.ID], &fullPost, item.DirName, item.Edited, out)
-	st.Add(item.Post.ID, entry)
-	if err := st.Save(); err != nil {
-		c.Log.Printf("  warning: failed to save state: %v", err)
-	}
+	return out
 }
 
 // applyBackfill mutates st.Posts to record UpdatedAt for legacy entries.
 // Idempotent and safe to call before or after applyItem; per-item updates
 // still operate on the corrected entries.
+//
+// Only mutates entries that genuinely exist in state — uses st.Get instead
+// of a raw map access so a future bug that sets BackfillUpdatedAt on a
+// post not in state (which classifyPost guarantees won't happen) cannot
+// silently create a ghost entry with empty title/dirname.
 func applyBackfill(st *state.State, items []syncItem) {
 	for _, item := range items {
 		if !item.BackfillUpdatedAt {
 			continue
 		}
-		entry := st.Posts[item.Post.ID]
+		entry, ok := st.Get(item.Post.ID)
+		if !ok {
+			continue
+		}
 		entry.UpdatedAt = item.Post.UpdatedAt
 		st.Posts[item.Post.ID] = entry
 	}

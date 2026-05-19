@@ -3,6 +3,7 @@ package syncer
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -12,7 +13,7 @@ import (
 
 // --- buildSyncEntry: state-after-failure invariants ---
 //
-// Regression for the codex re-review P1: applyItem used to call
+// Regression: applyItem used to call
 // postStateEntryPreserving(&fullPost, ...), which bumped UpdatedAt and
 // CommentsCount from the freshly-fetched post regardless of whether the
 // underlying writes succeeded. A failed writeJSON or DownloadMedia would
@@ -66,7 +67,7 @@ func TestBuildSyncEntry_EditedPostJSONFailed_PreservesUpdatedAt(t *testing.T) {
 	}
 }
 
-// Round 2 codex regression: an Edited post whose post.md regeneration
+// Regression: an Edited post whose post.md regeneration
 // fails must NOT bump UpdatedAt. Otherwise next sync sees the post as
 // caught-up and never retries the markdown — leaving a stale or missing
 // post.md without a normal recovery path (FILES_MISSING only fires when
@@ -87,7 +88,7 @@ func TestBuildSyncEntry_EditedMdFailed_PreservesUpdatedAt(t *testing.T) {
 	}
 }
 
-// Round 3 codex regression: edited post with existing comments where
+// Regression: edited post with existing comments where
 // downloadComments fails. With only a count check on the next sync,
 // a stale comments.json could otherwise live indefinitely if the count
 // happened to match. UpdatedAt must NOT advance so the Edited trigger
@@ -364,7 +365,7 @@ func TestDecideApplyActions_NeedFetch(t *testing.T) {
 
 // --- invalidateMediaForRedownload: skip-existing override ---
 //
-// Regression for the codex re-review P1: DownloadFile skips existing
+// Regression: DownloadFile skips existing
 // non-empty files, so an edited post that replaces media at the same
 // filename (image_001.jpg, video_001.mp4) would keep the stale bytes
 // while the apply path silently recorded success. invalidateMedia must
@@ -436,6 +437,44 @@ func TestInvalidateMedia_PureVideoMismatchOnlyRemovesVideos(t *testing.T) {
 	}
 }
 
+// Stale .tmp orphans from a prior crash (Client.downloadOnce writes to
+// <path>.tmp and renames; SIGKILL mid-copy leaves the .tmp) must not block
+// re-download. invalidateMediaForRedownload only targets the final path;
+// the stale .tmp is harmless because the next DownloadFile call's
+// os.Create(<path>.tmp) truncates it. This test pins both invariants:
+// the final path is gone after invalidation, and the .tmp survives without
+// triggering an error (the cleanup is downstream's responsibility).
+func TestInvalidateMedia_StaleTmpDoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	must := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must("video_001.mp4", "stale-video")
+	must("video_001.mp4.tmp", "partial-from-crash")
+
+	media := []parser.MediaItem{
+		{Type: "video", Filename: "video_001.mp4"},
+	}
+	log := &recordingLogger{}
+
+	if !invalidateMediaForRedownload(media, dir, true /*edited*/, log) {
+		t.Fatalf("returned false despite a stale .tmp; log=%s", log.joined())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "video_001.mp4")); !os.IsNotExist(err) {
+		t.Errorf("video_001.mp4 should have been removed; err=%v", err)
+	}
+	// .tmp survives — downstream DownloadFile overwrites it via os.Create's
+	// truncation. invalidateMediaForRedownload's contract is intentionally
+	// narrow: clear the final path so the existing-file skip in DownloadFile
+	// does not short-circuit the re-download.
+	if _, err := os.Stat(filepath.Join(dir, "video_001.mp4.tmp")); err != nil {
+		t.Errorf("video_001.mp4.tmp should still exist (cleanup is downstream); err=%v", err)
+	}
+}
+
 // ENOENT (file already gone or never existed) is normal and must not
 // fail the invalidation — DownloadMedia will then create the file fresh.
 func TestInvalidateMedia_MissingFilesAreOK(t *testing.T) {
@@ -451,5 +490,123 @@ func TestInvalidateMedia_MissingFilesAreOK(t *testing.T) {
 	}
 	if log.joined() != "" {
 		t.Errorf("expected no log lines for missing files, got %q", log.joined())
+	}
+}
+
+// --- applyBackfill: ghost-entry defense ---
+//
+// Regression for the audit finding: applyBackfill previously used a raw
+// map access (st.Posts[item.Post.ID]), which returns a zero PostEntry on
+// miss and silently creates an empty entry on write. classifyPost
+// guarantees BackfillUpdatedAt only fires when InState=true, but a
+// future refactor or test breaking that invariant would silently
+// corrupt state. The fix uses st.Get + ok-guard.
+
+func TestApplyBackfill_SkipsPostsNotInState(t *testing.T) {
+	st := &state.State{Posts: make(map[string]state.PostEntry)}
+	// Pre-populate with one legit entry so we can confirm it's still backfilled.
+	st.Posts["legit"] = state.PostEntry{
+		Title: "Legit Post", DirName: "legit_dir", UpdatedAt: 0,
+	}
+
+	items := []syncItem{
+		// Ghost: BackfillUpdatedAt set but post not in state.
+		// classifyPost never produces this; we craft it directly to prove
+		// the defensive guard works.
+		{
+			Post:              boosty.Post{ID: "ghost", UpdatedAt: 999},
+			BackfillUpdatedAt: true,
+		},
+		// Legit: matches a real state entry.
+		{
+			Post:              boosty.Post{ID: "legit", UpdatedAt: 200},
+			BackfillUpdatedAt: true,
+		},
+	}
+
+	applyBackfill(st, items)
+
+	if _, exists := st.Posts["ghost"]; exists {
+		t.Errorf("ghost entry was created in state.Posts; map should still only contain 'legit'")
+	}
+	if got := st.Posts["legit"].UpdatedAt; got != 200 {
+		t.Errorf("legit UpdatedAt = %d, want 200", got)
+	}
+	if got := st.Posts["legit"].Title; got != "Legit Post" {
+		t.Errorf("legit Title = %q, want 'Legit Post' (preserved)", got)
+	}
+}
+
+func TestApplyBackfill_IgnoresItemsWithoutFlag(t *testing.T) {
+	st := &state.State{Posts: make(map[string]state.PostEntry)}
+	st.Posts["p1"] = state.PostEntry{UpdatedAt: 100, Title: "P1"}
+
+	items := []syncItem{
+		{
+			// BackfillUpdatedAt false → must not touch the entry.
+			Post:              boosty.Post{ID: "p1", UpdatedAt: 999},
+			BackfillUpdatedAt: false,
+		},
+	}
+
+	applyBackfill(st, items)
+
+	if got := st.Posts["p1"].UpdatedAt; got != 100 {
+		t.Errorf("UpdatedAt = %d, want 100 (no backfill flag)", got)
+	}
+}
+
+// --- applyJustLocked / applyUpdate: defensive guard against missing entries ---
+//
+// classifyPost only sets JustLocked / Edited / NewComments / VideoMismatch /
+// Missing.* on InState=true posts. If that invariant is somehow violated
+// (future refactor, direct test seam misuse, race condition), the helpers
+// MUST refuse to act rather than silently fabricate state from zero values.
+
+func TestApplyJustLocked_NoEntry_LogsAndSkips(t *testing.T) {
+	log := &recordingLogger{}
+	c := &boosty.Client{Log: log}
+	e := &Engine{c: c, cfg: Config{}, res: newDirReserver()}
+
+	st := &state.State{Posts: make(map[string]state.PostEntry)}
+	item := syncItem{
+		Post:       boosty.Post{ID: "missing", Title: "Should Not Appear"},
+		JustLocked: true,
+		// Note: InState=false intentionally — classifyPost can't produce
+		// this combination, but the helper must defend.
+	}
+
+	e.applyJustLocked(st, item)
+
+	if _, exists := st.Posts["missing"]; exists {
+		t.Errorf("ghost entry created for invariant-violating JustLocked item")
+	}
+	if !strings.Contains(log.joined(), "missing") {
+		t.Errorf("expected warning log mentioning post ID; got: %s", log.joined())
+	}
+}
+
+func TestApplyUpdate_NoEntry_LogsAndSkips(t *testing.T) {
+	log := &recordingLogger{}
+	c := &boosty.Client{Log: log}
+	e := &Engine{c: c, cfg: Config{Blog: "myblog"}, res: newDirReserver()}
+
+	st := &state.State{Posts: make(map[string]state.PostEntry)}
+	item := syncItem{
+		Post:    boosty.Post{ID: "missing", Title: "Should Not Appear"},
+		DirName: "missing_dir",
+		Edited:  true,
+		// InState=false: classifyPost guarantees Edited implies InState; the
+		// defensive guard must catch a contract violation.
+	}
+
+	// blogDir is irrelevant here — the guard returns before any I/O.
+	e.applyUpdate(t.TempDir(), st, item)
+
+	if _, exists := st.Posts["missing"]; exists {
+		t.Errorf("ghost entry created for invariant-violating actionable update")
+	}
+	if !strings.Contains(log.joined(), "missing") {
+		t.Errorf("expected warning log mentioning post ID; got: %s", log.joined())
 	}
 }

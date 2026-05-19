@@ -91,6 +91,9 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	if blogName == "" && postURL == "" {
 		return fmt.Errorf("specify --blog or --url")
 	}
+	if blogName != "" && !blogNameRe.MatchString(blogName) {
+		return fmt.Errorf("invalid --blog %q: must match %s", blogName, blogNameRe)
+	}
 
 	c, err := newClient()
 	if err != nil {

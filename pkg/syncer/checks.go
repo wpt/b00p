@@ -2,11 +2,11 @@ package syncer
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/parser"
@@ -81,30 +81,18 @@ func (e *Engine) runCheckMedia(blogDir string, items []syncItem) {
 		jobs = append(jobs, i)
 	}
 
-	workers := max(1, min(e.cfg.Workers, len(jobs)))
-	c.Log.Printf("Checking media sizes (%d posts, %d workers)...", len(jobs), workers)
+	c.Log.Printf("Checking media sizes (%d posts, %d workers)...",
+		len(jobs), max(1, min(e.cfg.Workers, len(jobs))))
 
-	jobCh := make(chan int, len(jobs))
-	for _, j := range jobs {
-		jobCh <- j
-	}
-	close(jobCh)
-
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Go(func() {
-			for idx := range jobCh {
-				post := items[idx].Post
-				dir := filepath.Join(blogDir, items[idx].DirName)
-				mismatch := e.checkVideoSizes(&post, dir)
-				if mismatch != "" {
-					// Distinct indices per worker → safe write.
-					items[idx].VideoMismatch = mismatch
-				}
-			}
-		})
-	}
-	wg.Wait()
+	runWorkerPool(e.cfg.Workers, jobs, func(idx int) {
+		post := items[idx].Post
+		dir := filepath.Join(blogDir, items[idx].DirName)
+		mismatch := e.checkVideoSizes(&post, dir)
+		if mismatch != "" {
+			// Distinct indices per worker → safe write.
+			items[idx].VideoMismatch = mismatch
+		}
+	})
 }
 
 // checkVideoSizes validates local video files against remote for a post.
@@ -151,6 +139,17 @@ func hasOkVideo(blocks []boosty.ContentBlock) bool {
 // obtained via HEAD. The okcdn signed URLs bind to the UA used to fetch them, so
 // we must reuse the client's User-Agent.
 //
+// No Bearer auth is set: okcdn relies on URL signing (srcAg=... + token in the
+// path), not Authorization headers — same model as downloadOnce in
+// pkg/boosty/client.go. Adding Bearer would not break anything but would muddy
+// the contract; matching downloadOnce keeps both paths honest about how okcdn
+// is authenticated.
+//
+// httpc is c.HTTP (60s timeout). HEAD returns only headers — no body transfer
+// — so 60s is generous even for gigabyte videos on slow links; c.DownloadHTTP
+// (no timeout) is reserved for actual body streaming where a stuck connection
+// must not block forever on a request that legitimately takes minutes.
+//
 // Returns a descriptive issue string on real mismatches (missing local, non-200,
 // size differs). Transient problems (network error, missing Content-Length) are
 // logged and return empty — they are not treated as mismatches to avoid flagging
@@ -174,7 +173,13 @@ func checkRemoteVideoSize(httpc *http.Client, ua string, log boosty.Logger,
 		log.Printf("  check-media %s: HEAD error: %v", filename, err)
 		return ""
 	}
-	resp.Body.Close()
+	defer func() {
+		// Drain body before close so the connection can return to the pool;
+		// HEAD bodies are empty but Go's HTTP semantics still require this
+		// to signal reuse intent, otherwise the pool leaks under --workers > 1.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Sprintf("%s: HEAD %d", filename, resp.StatusCode)

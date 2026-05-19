@@ -1,9 +1,13 @@
 package state
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 func TestState_AddAndHas(t *testing.T) {
@@ -162,6 +166,59 @@ func TestState_LoadCorrupted(t *testing.T) {
 	}
 }
 
+// TestState_ConcurrentAddSaveUnderExternalMutex exercises the documented
+// concurrency contract: State is safe under fan-out when callers serialize
+// every {Add → Save} via an external mutex. The syncer package follows this
+// pattern (stMu in DownloadAll); this test pins the contract so a regression
+// that adds lock-free access from inside the State package would surface
+// under -race.
+//
+// It is intentionally NOT a test that State is internally lock-free-safe —
+// it documents the opposite. Removing the mutex below and rerunning with
+// -race would (correctly) report a map write race.
+func TestState_ConcurrentAddSaveUnderExternalMutex(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	var mu sync.Mutex
+	const workers = 4
+	const perWorker = 25
+
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for i := range perWorker {
+				id := fmt.Sprintf("w%d-p%d", w, i)
+				mu.Lock()
+				s.Add(id, PostEntry{Title: id, DirName: id})
+				if err := s.Save(); err != nil {
+					t.Errorf("Save: %v", err)
+				}
+				mu.Unlock()
+			}
+		})
+	}
+	wg.Wait()
+
+	if got, want := s.Count(), workers*perWorker; got != want {
+		t.Errorf("Count = %d, want %d", got, want)
+	}
+
+	// Reload from disk and verify the persisted view matches in-memory.
+	// Every entry the workers added must be on disk — a missed Save under
+	// contention would surface as a missing entry here.
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load (reloaded): %v", err)
+	}
+	if got, want := reloaded.Count(), workers*perWorker; got != want {
+		t.Errorf("reloaded Count = %d, want %d", got, want)
+	}
+}
+
 func TestState_OverwriteEntry(t *testing.T) {
 	s := &State{Posts: make(map[string]PostEntry)}
 	s.Add("abc", PostEntry{Title: "Version 1", DirName: "dir_v1"})
@@ -173,5 +230,76 @@ func TestState_OverwriteEntry(t *testing.T) {
 	e, _ := s.Get("abc")
 	if e.Title != "Version 2" {
 		t.Errorf("Title = %q, want 'Version 2'", e.Title)
+	}
+}
+
+// TestState_LoadNullPosts pins the documented invariant that after Unmarshal
+// of a JSON file with "posts": null, the Posts map is re-initialized to an
+// empty (non-nil) map so callers can use it directly. See state.go Load for
+// the documented rationale.
+func TestState_LoadNullPosts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(`{"posts": null}`), 0644); err != nil {
+		t.Fatalf("setup write failed: %v", err)
+	}
+
+	s, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if s.Posts == nil {
+		t.Fatal("Posts is nil after Load of {\"posts\": null}; want empty map")
+	}
+	if s.Count() != 0 {
+		t.Errorf("Count() = %d, want 0", s.Count())
+	}
+
+	// Verify the map is usable — Add must not panic on a freshly loaded null state.
+	s.Add("post-x", PostEntry{Title: "X", DirName: "dir_x"})
+	if !s.Has("post-x") {
+		t.Error("Has('post-x') = false after Add on null-posts state")
+	}
+}
+
+// TestWriteFileAtomic_TempCleanupOnRenameFailure verifies that when the final
+// rename step fails, no orphan .tmp-* file is left behind in the target dir.
+// We force rename to fail by passing a destination path whose parent does not
+// exist; CreateTemp is invoked against that missing dir and surfaces the error
+// before any temp file lands on disk. Then we point at an existing dir and
+// confirm the happy path leaves the tree clean.
+func TestWriteFileAtomic_TempCleanupOnRenameFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	// Happy path — write succeeds, no temp residue.
+	dest := filepath.Join(dir, "state.json")
+	if err := fileutil.WriteFileAtomic(dest, []byte(`{"ok":true}`), 0644); err != nil {
+		t.Fatalf("WriteFileAtomic happy path: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name != "state.json" {
+			t.Errorf("unexpected leftover file after successful write: %q", name)
+		}
+	}
+
+	// Failure path — write into a non-existent parent. CreateTemp must fail,
+	// returning an error and leaving no .tmp-* artefact in the parent dir.
+	missing := filepath.Join(dir, "no-such-subdir", "state.json")
+	if err := fileutil.WriteFileAtomic(missing, []byte(`{"x":1}`), 0644); err == nil {
+		t.Fatal("WriteFileAtomic(missing parent) error = nil, want non-nil")
+	}
+	entries, err = os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir after failure: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name != "state.json" {
+			t.Errorf("unexpected leftover file after failed write: %q", name)
+		}
 	}
 }

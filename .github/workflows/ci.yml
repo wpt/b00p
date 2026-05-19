@@ -29,6 +29,15 @@ jobs:
         # v1.3.0 is the first version that compiles cleanly.
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.3.0 ./...
       - name: Run tests with coverage and race detector
+        # CGO_ENABLED=1 is required for -race. ubuntu-latest with setup-go
+        # already enables CGO by default, but pinning it explicitly here
+        # documents the dependency and prevents a surprise red build if the
+        # runner image, the action, or a future Go toolchain flips the
+        # default to 0 (e.g. minimal/distroless variants). Without CGO this
+        # step fails fast with "-race requires cgo; enable cgo by setting
+        # CGO_ENABLED=1" — the explicit env keeps that from happening.
+        env:
+          CGO_ENABLED: "1"
         run: go test ./... -race -coverprofile=coverage.out -covermode=atomic
       - name: Compute coverage percentage
         id: cov

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 // FileName is the name of the state file in each blog directory.
@@ -28,6 +30,11 @@ type PostEntry struct {
 }
 
 // State tracks which posts have been downloaded for a blog.
+//
+// State is NOT safe for concurrent use; callers that mutate it from multiple
+// goroutines (e.g. the --workers > 1 download pool) must serialise access
+// through their own mutex. The in-memory operations (Has, Get, Add, Count)
+// are plain map access and never lock on their own.
 type State struct {
 	Posts    map[string]PostEntry `json:"posts"`
 	LastSync string               `json:"lastSync"`
@@ -41,8 +48,9 @@ type State struct {
 // previously tracked post.
 //
 // The Posts map is always non-nil on a successful return so callers can use
-// it directly. The JSON nil-check after Unmarshal is intentional and
-// documented in AGENTS.md.
+// it directly. The JSON nil-check after Unmarshal is intentional — a payload
+// of `{"posts": null}` would otherwise leave the map nil and panic on the
+// first Add.
 func Load(dir string) (*State, error) {
 	s := &State{
 		Posts: make(map[string]PostEntry),
@@ -93,36 +101,7 @@ func (s *State) Save() error {
 	if err != nil {
 		return err
 	}
-	return WriteFileAtomic(s.path, data, 0644)
-}
-
-// WriteFileAtomic writes data to path via a temp file in the same directory,
-// fsyncs it, then renames over the destination. A crash mid-write leaves the
-// original file untouched.
-func WriteFileAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) // no-op if rename succeeded
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return fileutil.WriteFileAtomic(s.path, data, 0644)
 }
 
 // Count returns the number of tracked posts.

@@ -52,12 +52,13 @@ type Logger interface {
 
 // ProgressLogger extends Logger with support for in-place progress updates.
 //
-// Implementations MUST be safe for concurrent calls to Printf, Progress, and
-// ClearProgress from multiple goroutines. The client invokes Progress from
-// download workers (--workers > 1) while Printf may fire from the orchestrator
-// at the same time; without internal synchronization the spinner line and a
-// log line race and produce garbled output (or, worse, data races on a
-// `hasProgress`-style flag). See cmd/log.go for a reference implementation.
+// SAFETY: Implementations must synchronize all calls to Printf, Progress, and
+// ClearProgress with a mutex. See cmd/log.go for the reference implementation.
+//
+// The client invokes Progress from download workers (--workers > 1) while
+// Printf may fire from the orchestrator at the same time; without internal
+// synchronization the spinner line and a log line race and produce garbled
+// output (or, worse, data races on a `hasProgress`-style flag).
 type ProgressLogger interface {
 	Logger
 	// Progress writes a line that will be overwritten by the next Progress call.
@@ -115,6 +116,11 @@ func (c *Client) GetJSON(url string, out any) error {
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			// Best-effort read for error context: if the body itself errors out
+			// (truncated stream, mid-read network drop), the status code we
+			// already have is the load-bearing diagnostic, so a partial body —
+			// or none at all — is acceptable and we intentionally discard the
+			// read error.
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			httpErr := fmt.Errorf("API %s returned %d: %s", url, resp.StatusCode, string(body))
@@ -402,7 +408,7 @@ func (c *Client) FetchComments(blog, postID string, limit int) iter.Seq2[Comment
 			url := CommentsURL(blog, postID, limit, offset)
 			var resp CommentsResponse
 			if err := c.GetJSON(url, &resp); err != nil {
-				yield(Comment{}, err)
+				yield(Comment{}, fmt.Errorf("fetch comments: %w", err))
 				return
 			}
 

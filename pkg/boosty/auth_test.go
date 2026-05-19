@@ -1,6 +1,7 @@
 package boosty
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -101,6 +102,42 @@ func TestTokens_SaveAndLoad(t *testing.T) {
 
 	if loaded.AccessToken != "access" || loaded.RefreshToken != "refresh" || loaded.DeviceID != "device" {
 		t.Errorf("Round-trip failed: %+v", loaded)
+	}
+}
+
+// Regression: the previous Refresh body was built by fmt.Sprintf and would
+// produce invalid JSON if RefreshToken or DeviceID contained backslashes,
+// quotes, or newlines. The typed refreshRequest must round-trip cleanly
+// through json.Marshal regardless of token contents.
+func TestRefreshRequest_EscapesSpecialChars(t *testing.T) {
+	cases := []struct {
+		name         string
+		deviceID     string
+		refreshToken string
+	}{
+		{"backslash", `dev\id`, `ref\token`},
+		{"quote", `dev"id`, `ref"token`},
+		{"newline", "dev\nid", "ref\ntoken"},
+		{"all", "dev\\\"\nid", "ref\\\"\ntoken"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(refreshRequest{
+				DeviceID:     tc.deviceID,
+				RefreshToken: tc.refreshToken,
+			})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got refreshRequest
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatalf("unmarshal %q: %v", body, err)
+			}
+			if got.DeviceID != tc.deviceID || got.RefreshToken != tc.refreshToken {
+				t.Errorf("round-trip mismatch: got %+v, want device=%q refresh=%q",
+					got, tc.deviceID, tc.refreshToken)
+			}
+		})
 	}
 }
 

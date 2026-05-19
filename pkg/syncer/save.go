@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/downloader"
+	"github.com/wpt/b00p/pkg/fileutil"
 	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/state"
 )
@@ -38,6 +38,9 @@ const commentsPageLimit = 100
 // External video failures are NOT fatal: DownloadExternal is opt-in and
 // depends on third-party sites that fail in routine ways (geo-blocks, age
 // gates, dead links). They are logged and ignored for the state contract.
+//
+// Contract: dirName is "" iff err is nil AND the post was inaccessible. For
+// every accessible post the return is (non-empty name, nil-or-error).
 func (e *Engine) SavePost(post *boosty.Post) (string, error) {
 	if !post.HasAccess {
 		e.c.Log.Printf("  skipping (no access): %s", post.Title)
@@ -137,7 +140,7 @@ func writeJSON(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", filepath.Base(path), err)
 	}
-	return state.WriteFileAtomic(path, data, 0644)
+	return fileutil.WriteFileAtomic(path, data, 0644)
 }
 
 // writePostMarkdown generates markdown for a post and writes it to dir/post.md
@@ -145,74 +148,5 @@ func writeJSON(path string, v any) error {
 // failure.
 func writePostMarkdown(post *boosty.Post, parsed parser.ParsedContent, dir string) error {
 	md := parser.GenerateMarkdown(post, parsed)
-	return state.WriteFileAtomic(filepath.Join(dir, "post.md"), []byte(md), 0644)
-}
-
-// dirReserver tracks which directory names are in flight or already owned by
-// a given post ID, so two concurrent workers cannot pick the same target dir
-// for posts whose formatted names collide. A pure-filesystem check would race
-// between two workers that have not yet written post.json.
-//
-// A reservation is keyed by absolute blog dir + base name. Once owned by a
-// post ID it is never released — even on failure — so a second post that
-// would have collided is forced to a suffix instead of clobbering partial
-// data on disk.
-type dirReserver struct {
-	mu    sync.Mutex
-	owned map[string]string // key = blogDir + "\x00" + name → postID
-}
-
-func newDirReserver() *dirReserver {
-	return &dirReserver{owned: make(map[string]string)}
-}
-
-// reserve returns a directory name (relative to blogDir) safe to use for the
-// given postID. If base is unowned and either free on disk or already holds
-// this post, base is returned. Otherwise the post ID is appended as a suffix
-// so the caller never silently overwrites a sibling or a peer worker.
-func (r *dirReserver) reserve(blogDir, postID, base string) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if name, ok := r.tryName(blogDir, postID, base); ok {
-		return name
-	}
-	suffix := postID
-	if len(suffix) > 8 {
-		suffix = suffix[:8]
-	}
-	candidate := base + "_" + suffix
-	// Suffix collisions in practice require an 8-char hex prefix collision
-	// AND a name collision; if it ever happens, fall through and accept it —
-	// the on-disk post.json check still prevents data loss for the same ID.
-	r.owned[blogDir+"\x00"+candidate] = postID
-	return candidate
-}
-
-// tryName reports whether `name` can be used by postID. It returns the name
-// when the in-process map either has no owner, or already names this post;
-// or when the filesystem has no post.json or has one belonging to this post.
-// The reservation is recorded on success.
-func (r *dirReserver) tryName(blogDir, postID, name string) (string, bool) {
-	key := blogDir + "\x00" + name
-	if owner, ok := r.owned[key]; ok {
-		if owner == postID {
-			return name, true
-		}
-		return "", false
-	}
-	target := filepath.Join(blogDir, name)
-	data, err := os.ReadFile(filepath.Join(target, "post.json"))
-	if err != nil {
-		r.owned[key] = postID
-		return name, true
-	}
-	var existing struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(data, &existing); err != nil || existing.ID == "" || existing.ID == postID {
-		r.owned[key] = postID
-		return name, true
-	}
-	return "", false
+	return fileutil.WriteFileAtomic(filepath.Join(dir, "post.md"), []byte(md), 0644)
 }

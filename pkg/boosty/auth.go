@@ -1,13 +1,14 @@
 package boosty
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 // Tokens holds authentication credentials for the Boosty API.
@@ -46,43 +47,31 @@ func LoadTokens(path string) (*Tokens, error) {
 	return &tokens, nil
 }
 
-// SaveTokens writes tokens to a JSON file atomically (temp + rename), so an
-// interrupted write cannot truncate an existing auth.json.
+// SaveTokens writes tokens to a JSON file atomically (temp + fsync + rename),
+// so an interrupted write cannot truncate an existing auth.json. Permissions
+// are restricted to 0600 since the file holds bearer credentials.
 func (t *Tokens) SaveTokens(path string) error {
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal tokens: %w", err)
 	}
+	return fileutil.WriteFileAtomic(path, data, 0600)
+}
 
-	dir, name := filepath.Split(path)
-	// filepath.Split("auth.json") returns dir="", which os.CreateTemp would
-	// resolve to os.TempDir(); the rename then crosses filesystems and stops
-	// being atomic. Force "." so the temp file lives next to the destination.
-	if dir == "" {
-		dir = "."
-	}
-	tmp, err := os.CreateTemp(dir, name+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+// refreshRequest is the POST body sent to /oauth/token/.
+// Modeled as a typed struct so json.Marshal handles escaping for arbitrary
+// token contents (backslashes, quotes, newlines) — earlier code stitched the
+// body with fmt.Sprintf and would have produced invalid JSON on such tokens.
+type refreshRequest struct {
+	DeviceID     string `json:"device_id"`
+	RefreshToken string `json:"refresh_token"`
+}
 
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+// refreshResponse is the /oauth/token/ success payload.
+type refreshResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
 }
 
 // Refresh obtains a new access token using the refresh token.
@@ -91,8 +80,14 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 		httpClient = http.DefaultClient
 	}
 
-	body := fmt.Sprintf(`{"device_id":"%s","refresh_token":"%s"}`, t.DeviceID, t.RefreshToken)
-	req, err := http.NewRequest("POST", BaseURL+"/oauth/token/", strings.NewReader(body))
+	body, err := json.Marshal(refreshRequest{
+		DeviceID:     t.DeviceID,
+		RefreshToken: t.RefreshToken,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal refresh body: %w", err)
+	}
+	req, err := http.NewRequest("POST", BaseURL+"/oauth/token/", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create refresh request: %w", err)
 	}
@@ -112,11 +107,7 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 		return fmt.Errorf("token refresh failed (status %d). Get new tokens from browser cookies and update auth.json", resp.StatusCode)
 	}
 
-	var result struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-	}
+	var result refreshResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("decode refresh response: %w", err)
 	}

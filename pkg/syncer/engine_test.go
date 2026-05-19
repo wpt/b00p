@@ -211,6 +211,79 @@ func TestEngine_ApplyItem_FailedCommentsPreservesUpdatedAt(t *testing.T) {
 	}
 }
 
+// Regression: edited post whose post.md write fails must not
+// advance UpdatedAt — otherwise the next sync sees state in sync with API
+// and never retries the markdown. apply_test.go pins this on buildSyncEntry;
+// this test pins the full applyItem → state.Save path so a future regression
+// that bypasses out.MDOK would not pass the unit tests yet still break
+// production. We force the md write to fail by pre-creating a directory at
+// post.md's path: WriteFileAtomic ultimately rename()s onto post.md, which
+// errors when the destination is a non-empty directory on every platform.
+func TestEngine_ApplyItem_EditedMdFailurePreservesUpdatedAt(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	if err := os.MkdirAll(postDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1"}`)
+	writeFile(t, filepath.Join(postDir, "comments.json"), `[]`)
+	// Pre-create post.md AS A DIRECTORY with content so the upcoming
+	// WriteFileAtomic rename onto it fails on every OS. A bare empty dir
+	// would also fail on Linux/macOS but not on Windows.
+	mdAsDir := filepath.Join(postDir, "post.md")
+	if err := os.Mkdir(mdAsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(mdAsDir, "block.txt"), "blocking")
+
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100, HasComments: true, HasMd: true},
+	})
+
+	newPost := boosty.Post{
+		ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200,
+		Count: boosty.PostCount{Comments: 1},
+		Data:  []boosty.ContentBlock{{Type: "text", Content: `["body","unstyled",[]]`}},
+	}
+	f.SinglePost(blog, "p1", newPost)
+	f.CommentsList(blog, "p1", boosty.Comment{ID: "c1", CreatedAt: 12345})
+
+	cfg := Config{Blog: blog, OutputDir: outDir, WithMD: true, WithComments: true}
+	e := New(f.client, cfg)
+
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := syncItem{
+		Post: boosty.Post{
+			ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200,
+			Count: boosty.PostCount{Comments: 1},
+		},
+		DirName:  "p1_dir",
+		Existing: st.Posts["p1"],
+		InState:  true,
+		Edited:   true,
+	}
+	e.applyItem(blogDir, st, item)
+
+	reloaded, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := reloaded.Posts["p1"]
+	if got.UpdatedAt != 100 {
+		t.Errorf("UpdatedAt = %d, want 100 (advanced despite md failure)", got.UpdatedAt)
+	}
+	if !got.HasMd {
+		t.Error("HasMd = false, want true (prior tracking must be preserved when this run did not write md)")
+	}
+}
+
 // --- DownloadAll: concurrent workers ---
 
 func TestEngine_DownloadAll_MultiWorkerSavesAllPosts(t *testing.T) {
