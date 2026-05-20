@@ -3,6 +3,7 @@ package boosty
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -10,6 +11,13 @@ import (
 
 	"github.com/wpt/b00p/pkg/fileutil"
 )
+
+// ErrRefreshRejected marks a token refresh the server rejected with a 4xx
+// status: the refresh token itself is dead (expired or revoked), so retrying
+// the identical request cannot succeed. GetJSON fails fast on it instead of
+// burning the backoff schedule. The message doubles as the user-facing
+// instruction, so refresh errors render exactly as before.
+var ErrRefreshRejected = errors.New("Get new tokens from browser cookies and update auth.json")
 
 // Tokens holds authentication credentials for the Boosty API.
 type Tokens struct {
@@ -104,6 +112,13 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			// Deterministic rejection: the refresh body (device_id +
+			// refresh_token) cannot change between attempts, so a 4xx
+			// verdict is permanent. Wrap the sentinel so callers fail fast.
+			return fmt.Errorf("token refresh failed (status %d). %w", resp.StatusCode, ErrRefreshRejected)
+		}
+		// 5xx / 429: transient edge failure — the retry loop may recover.
 		return fmt.Errorf("token refresh failed (status %d). Get new tokens from browser cookies and update auth.json", resp.StatusCode)
 	}
 
@@ -116,7 +131,17 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 	if result.RefreshToken != "" {
 		t.RefreshToken = result.RefreshToken
 	}
-	t.ExpiresAt = time.Now().UnixMilli() + result.ExpiresIn*1000
+	// Clamp ExpiresIn to a sensible floor — a degenerate server response of
+	// 0 / negative would mark the freshly-issued token as already expired,
+	// so the next API call would do one redundant reactive refresh before
+	// proceeding (not a loop — the second refresh succeeds and IsExpired is
+	// then false). Real Boosty tokens last hours; an hour floor avoids that
+	// wasted round-trip without affecting normal behavior.
+	expiresIn := result.ExpiresIn
+	if expiresIn < 60 {
+		expiresIn = 3600
+	}
+	t.ExpiresAt = time.Now().UnixMilli() + expiresIn*1000
 
 	return nil
 }
