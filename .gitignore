@@ -1,12 +1,16 @@
 auth.json
 auth.json.bak
+auth.json.tmp-*
 output/
 
 # binaries
 b00p
 b00p_*
+b00p.*
 *.exe
-b00p.linux
+
+# release artifacts (goreleaser snapshot output)
+dist/
 
 # coverage
 cov
@@ -17,6 +21,7 @@ coverage.html
 
 # crash-safe download orphans (overwritten by next run; never committed)
 *.tmp
+*.tmp.url
 
 # IDE
 .idea/
