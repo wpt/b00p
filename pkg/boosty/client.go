@@ -1,27 +1,43 @@
 package boosty
 
+// Request layer: the authenticated Client, retry/backoff engine, token
+// refresh handling, and the post/comment iterators. The media-download path
+// lives in download.go; API URL builders in urls.go; token storage and
+// refresh protocol in auth.go.
+
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
 	"net/http"
-	neturl "net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
+// ErrFetchPage marks an iterator-level failure in FetchPosts / FetchComments:
+// the whole page request failed (transport, 5xx after retries, refresh
+// rejected, etc.) and the iteration terminates. Distinct from a per-post
+// json.Unmarshal failure inside a successful page, which the iterators
+// recover from by yielding (Zero, parseErr) and continuing to the next item.
+// Consumers use errors.Is(err, ErrFetchPage) to decide whether to abort the
+// whole sync (page error) vs. skip the offending item (parse error).
+var ErrFetchPage = errors.New("page fetch failed")
+
 const (
 	BaseURL   = "https://api.boosty.to"
 	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
-
-	maxRetries = 3
 )
 
-var retryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+// RetryDelays controls the backoff schedule between retry attempts. The
+// slice length defines the retry count: first attempt + one retry per entry.
+// Exposed as a package variable so tests can shrink the schedule to
+// milliseconds instead of the 5s/15s/30s the CLI uses against real network
+// flake. Library callers may also resize it — the retry loops derive their
+// attempt count from len(RetryDelays), so any non-empty schedule is valid.
+var RetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
 
 // Client is an authenticated HTTP client for the Boosty API.
 //
@@ -85,32 +101,43 @@ func NewClient(tokens *Tokens, authPath string) *Client {
 		},
 		DownloadHTTP: &http.Client{
 			// No Timeout: media downloads can legitimately take many minutes.
+			// Per-attempt liveness is enforced by ResponseHeaderTimeout in the
+			// transport (caps wait for headers) plus an idle-read watchdog in
+			// downloadOnce that cancels the request context if the body stops
+			// delivering bytes for downloadIdleTimeout.
+			Transport: newDownloadTransport(),
 		},
 		Log: discardLogger{},
 	}
 }
 
-// waitRetry logs and sleeps before retry attempt N (1-based, in range [1, maxRetries]).
-// The label prefixes the log line (e.g. "retry" or "download retry").
+// waitRetry logs and sleeps before retry attempt N (1-based, in range
+// [1, len(RetryDelays)]). The label prefixes the log line (e.g. "retry" or
+// "download retry").
 func (c *Client) waitRetry(label string, attempt int) {
-	delay := retryDelays[attempt-1]
-	c.Log.Printf("  %s %d/%d in %s...", label, attempt, maxRetries, delay)
+	delay := RetryDelays[attempt-1]
+	c.Log.Printf("  %s %d/%d in %s...", label, attempt, len(RetryDelays), delay)
 	time.Sleep(delay)
 }
 
 // GetJSON makes an authenticated GET request and decodes the JSON response.
-// Retries on network errors and transient HTTP responses (5xx, 429) with
-// backoff; non-transient HTTP errors (4xx other than 429, 401-after-refresh)
-// fail fast.
+// Retries with backoff on network errors and transient HTTP responses (5xx,
+// 429). Non-transient HTTP statuses (4xx other than 429) fail fast, and so
+// does a server-rejected token refresh (ErrRefreshRejected): the refresh
+// request body is deterministic, so a 4xx verdict cannot change on retry —
+// retrying would only delay the actionable "get new tokens" message.
 func (c *Client) GetJSON(url string, out any) error {
 	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= len(RetryDelays); attempt++ {
 		if attempt > 0 {
 			c.waitRetry("retry", attempt)
 		}
 
 		resp, err := c.doRequest("GET", url)
 		if err != nil {
+			if errors.Is(err, ErrRefreshRejected) {
+				return err
+			}
 			lastErr = err
 			continue
 		}
@@ -138,164 +165,7 @@ func (c *Client) GetJSON(url string, out any) error {
 		resp.Body.Close()
 		return err
 	}
-	return fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
-}
-
-// DownloadFile downloads a URL to a local file path.
-// Skips if file already exists with size > 0. Removes 0-byte files.
-// Uses a separate HTTP client with no timeout for large files.
-// Logs progress with file size.
-func (c *Client) DownloadFile(url, path string) error {
-	// Integrity check: skip existing non-empty files
-	if info, err := os.Stat(path); err == nil {
-		if info.Size() > 0 {
-			c.Log.Printf("  skipping %s (already exists, %s)", path, FormatSize(info.Size()))
-			return nil
-		}
-		// Remove 0-byte files
-		os.Remove(path)
-	}
-
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			c.waitRetry("download retry", attempt)
-		}
-
-		err := c.downloadOnce(url, path)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-	}
-	return fmt.Errorf("after %d retries: %w", maxRetries, lastErr)
-}
-
-var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
-
-func (c *Client) downloadOnce(url, path string) error {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	// okcdn signed URLs bind to the User-Agent used when obtaining them (see
-	// srcAg=... in the URL). Reuse the client UA or the server returns 400.
-	req.Header.Set("User-Agent", UserAgent)
-	resp, err := c.DownloadHTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: status %d", url, resp.StatusCode)
-	}
-
-	// Write to <path>.tmp and rename on success. A SIGKILL/power-loss mid-copy
-	// leaves a .tmp orphan instead of poisoning the final path: next run sees
-	// the final path missing and re-downloads, while os.Create on the same
-	// .tmp path overwrites the stale partial.
-	//
-	// Invariants this relies on:
-	//   - path and path+".tmp" live on the same filesystem. os.Rename across
-	//     filesystems returns EXDEV on Linux/macOS and ERROR_NOT_SAME_DEVICE
-	//     on Windows; all current callers keep media under the same blog dir
-	//     as the destination, so this holds. A future caller that puts the
-	//     tmp staging area on a different mount must implement copy+remove.
-	//   - No two goroutines target the same `path` concurrently. The syncer
-	//     dirReserver gives each post a unique directory and DownloadMedia
-	//     emits unique filenames per media slot, so concurrent workers do
-	//     not race on the .tmp suffix. Direct callers outside the syncer
-	//     must enforce this themselves.
-	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("create file %s: %w", tmpPath, err)
-	}
-
-	totalSize := resp.ContentLength
-	filename := filepath.Base(path)
-
-	plog, hasProgress := c.Log.(ProgressLogger)
-	pw := &progressWriter{
-		writer:    f,
-		total:     totalSize,
-		filename:  filename,
-		log:       plog,
-		hasLog:    hasProgress,
-		startTime: time.Now(),
-	}
-
-	_, copyErr := io.Copy(pw, resp.Body)
-	closeErr := f.Close()
-	if hasProgress {
-		plog.ClearProgress()
-	}
-	if copyErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("write %s: %w", path, copyErr)
-	}
-	// Close errors surface delayed write/flush failures. Without this check a
-	// truncated download could be reported as a successful download.
-	if closeErr != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("close %s: %w", path, closeErr)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
-	}
-
-	c.Log.Printf("  downloaded %s (%s)", filename, FormatSize(pw.written))
-	return nil
-}
-
-type progressWriter struct {
-	writer    io.Writer
-	total     int64
-	written   int64
-	filename  string
-	log       ProgressLogger
-	hasLog    bool
-	startTime time.Time
-	lastLog   time.Time
-	frame     int
-}
-
-func (pw *progressWriter) Write(p []byte) (int, error) {
-	n, err := pw.writer.Write(p)
-	pw.written += int64(n)
-
-	if pw.hasLog && time.Since(pw.lastLog) > 100*time.Millisecond {
-		pw.lastLog = time.Now()
-		spinner := string(spinnerFrames[pw.frame%len(spinnerFrames)])
-		pw.frame++
-
-		if pw.total > 0 {
-			pct := float64(pw.written) / float64(pw.total) * 100
-			pw.log.Progress("  %s %s  %s / %s  (%.1f%%)",
-				spinner, pw.filename, FormatSize(pw.written), FormatSize(pw.total), pct)
-		} else {
-			pw.log.Progress("  %s %s  %s",
-				spinner, pw.filename, FormatSize(pw.written))
-		}
-	}
-
-	return n, err
-}
-
-// FormatSize formats a byte count as a human-readable string.
-func FormatSize(bytes int64) string {
-	switch {
-	case bytes >= 1<<30:
-		return fmt.Sprintf("%.1f GB", float64(bytes)/float64(1<<30))
-	case bytes >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(bytes)/float64(1<<20))
-	case bytes >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/float64(1<<10))
-	default:
-		return fmt.Sprintf("%d B", bytes)
-	}
+	return fmt.Errorf("after %d retries: %w", len(RetryDelays), lastErr)
 }
 
 // currentToken returns the access token under lock together with its
@@ -371,7 +241,7 @@ func (c *Client) FetchPosts(blog string, limit int) iter.Seq2[Post, error] {
 			url := PostsURL(blog, limit, offset)
 			var resp PostsResponse
 			if err := c.GetJSON(url, &resp); err != nil {
-				yield(Post{}, fmt.Errorf("fetch posts: %w", err))
+				yield(Post{}, fmt.Errorf("%w: %w", ErrFetchPage, err))
 				return
 			}
 
@@ -399,68 +269,31 @@ func (c *Client) FetchPosts(blog string, limit int) iter.Seq2[Post, error] {
 	}
 }
 
-// FetchComments returns an iterator over all comments on a post.
-// Handles pagination internally, yields one Comment at a time.
+// FetchComments returns an iterator over a single page of top-level comments
+// on a post (replies are inlined per item up to defaultReplyLimit=100).
+//
+// The Boosty comments endpoint ignores `offset>0` (returns data=[] with
+// isLast=true even when more pages exist), so pagination beyond the first
+// page does not actually work — pass a `limit` value that covers every
+// top-level thread in one call. The CLI uses limit=101 with cap detection;
+// library callers should size `limit` similarly (>= post.Count.Comments
+// expected top-level threads) and treat the result as "what fit in the
+// first page". A returned page of exactly `limit` items hints that the
+// post may have more threads than the call could retrieve.
 func (c *Client) FetchComments(blog, postID string, limit int) iter.Seq2[Comment, error] {
 	return func(yield func(Comment, error) bool) {
-		offset := 0
-		for {
-			url := CommentsURL(blog, postID, limit, offset)
-			var resp CommentsResponse
-			if err := c.GetJSON(url, &resp); err != nil {
-				yield(Comment{}, fmt.Errorf("fetch comments: %w", err))
+		// Single GET, no pagination loop: the server ignores offset>0 (see
+		// doc comment), so a second request can never yield anything — the
+		// first page IS the result.
+		var resp CommentsResponse
+		if err := c.GetJSON(CommentsURL(blog, postID, limit, 0), &resp); err != nil {
+			yield(Comment{}, fmt.Errorf("%w: %w", ErrFetchPage, err))
+			return
+		}
+		for _, comment := range resp.Data {
+			if !yield(comment, nil) {
 				return
 			}
-
-			for _, comment := range resp.Data {
-				if !yield(comment, nil) {
-					return
-				}
-			}
-
-			if resp.Extra.IsLast || len(resp.Data) == 0 {
-				return
-			}
-			offset += len(resp.Data)
 		}
 	}
-}
-
-// URL builders
-
-// PostsURL returns the URL for listing blog posts.
-// The offset is opaque server-supplied data which can contain `+`, `=`, `&`,
-// or `%` and so must be query-escaped before being concatenated into the URL.
-func PostsURL(blogName string, limit int, offset string) string {
-	u := fmt.Sprintf("%s/v1/blog/%s/post/?limit=%d", BaseURL, blogName, limit)
-	if offset != "" {
-		u += "&offset=" + neturl.QueryEscape(offset)
-	}
-	return u
-}
-
-// PostURL returns the URL for a single post.
-func PostURL(blogName, postID string) string {
-	return fmt.Sprintf("%s/v1/blog/%s/post/%s", BaseURL, blogName, postID)
-}
-
-// defaultReplyLimit caps how many replies Boosty inlines per top-level comment.
-// Without this query param the server inlines 0 replies even when replyCount > 0
-// (the parent endpoint returns replies.data=[] with isLast=true regardless of
-// the actual replyCount), so we silently lose every reply body. 100 covers the
-// vast majority of threads; deeper threads will surface as a count mismatch
-// against API Count.Comments and re-trigger a sync.
-const defaultReplyLimit = 100
-
-// CommentsURL returns the URL for post comments. reply_limit is set to
-// defaultReplyLimit to force the server to inline replies; see the constant
-// for why.
-func CommentsURL(blogName, postID string, limit, offset int) string {
-	return fmt.Sprintf("%s/v1/blog/%s/post/%s/comment/?limit=%d&offset=%d&reply_limit=%d",
-		BaseURL, blogName, postID, limit, offset, defaultReplyLimit)
-}
-
-// UserSubscriptionsURL returns the URL for the current user's subscriptions.
-func UserSubscriptionsURL() string {
-	return BaseURL + "/v1/user/subscriptions"
 }
