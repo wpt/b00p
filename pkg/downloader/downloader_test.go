@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/parser"
@@ -139,9 +140,14 @@ func TestDownloadMedia_Success(t *testing.T) {
 // that returns on first error would skip later items; a regression that
 // silently swallowed failures would mark a partially-downloaded post complete.
 func TestDownloadMedia_MixedSuccessAndFailure(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping retry test in short mode (~50s due to DownloadFile backoff)")
-	}
+	// A 404 is non-retriable (fails fast on the first attempt), so this
+	// shrink is defensive — it keeps the test fast even if the failure mode
+	// here ever becomes retriable. The retry classification is exercised in
+	// pkg/boosty tests; here we only care about the per-item error wrapping.
+	saved := boosty.RetryDelays
+	boosty.RetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { boosty.RetryDelays = saved }()
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/good.jpg":
