@@ -45,6 +45,14 @@ func TestSanitizeTitle(t *testing.T) {
 		{"collapse spaces", "too   many   spaces", "too many spaces"},
 		{"trim", "  trimmed  ", "trimmed"},
 		{"pipe", "a|b", "ab"},
+		// Non-space control characters are stripped (Windows MkdirAll rejects
+		// paths containing them — a title with a BEL/NUL would make the post
+		// permanently un-downloadable); space-like controls (\t etc.) survive
+		// to strings.Fields and collapse into a single separator.
+		{"control_bel", "a\x07b", "ab"},
+		{"control_nul", "a\x00b", "ab"},
+		{"control_del", "a\x7fb", "ab"},
+		{"control_tab_is_separator", "a\tb", "a b"},
 	}
 
 	for _, tt := range tests {

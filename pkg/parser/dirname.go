@@ -103,6 +103,18 @@ func FormatDate(t time.Time, format string) string {
 // SanitizeTitle cleans a post title for use as a directory name.
 func SanitizeTitle(title string) string {
 	s := unsafeCharsRe.ReplaceAllString(title, "")
+	// Strip non-space control bytes (C0 0x00-0x1F, DEL 0x7F, C1 0x80-0x9F).
+	// Windows os.MkdirAll rejects any path containing them, so a stray
+	// control char in a Boosty title (paste artifact, BEL, NUL, etc.) would
+	// otherwise make that post permanently undownloadable and re-error on
+	// every --sync. Space-like controls (\t\n\v\f\r) are left for the
+	// strings.Fields call below to collapse into a single separating space.
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && !unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 	s = strings.Join(strings.Fields(s), " ")
 	s = strings.TrimSpace(s)
 	if len([]rune(s)) > 80 {
