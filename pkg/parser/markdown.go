@@ -39,7 +39,7 @@ func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 		b.WriteString(fmt.Sprintf("tags: [%s]\n", strings.Join(quoted, ", ")))
 	}
 	if post.Price > 0 {
-		b.WriteString(fmt.Sprintf("price: %d\n", post.Price))
+		b.WriteString(fmt.Sprintf("price: %g\n", post.Price))
 	}
 	if post.SubscriptionLevel != nil && post.SubscriptionLevel.Name != "" {
 		b.WriteString(fmt.Sprintf("tier: %s\n", yamlString(post.SubscriptionLevel.Name)))
