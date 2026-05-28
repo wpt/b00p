@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -173,6 +174,41 @@ func TestParseBlocks_SkipsEmptyImageURL(t *testing.T) {
 	}
 }
 
+// An ok_video block with no usable MP4 (HLS/DASH-only variants, a real API
+// condition) is dropped from Media but must be COUNTED — SkippedVideos feeds
+// the "videos skipped" warning in the syncer, the only user-visible signal
+// that the post's video did not land on disk.
+func TestParseBlocks_CountsSkippedVideos(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{
+			{Type: "hls", URL: "https://example.com/playlist.m3u8"},
+			{Type: "dash", URL: "https://example.com/manifest.mpd"},
+			{Type: "high", URL: ""}, // empty MP4 variant
+		}},
+		{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{
+			{Type: "high", URL: "https://example.com/v.mp4"},
+		}},
+	}
+	result := ParseBlocks(blocks)
+	if result.SkippedVideos != 1 {
+		t.Errorf("SkippedVideos = %d, want 1", result.SkippedVideos)
+	}
+	if len(result.Media) != 1 || result.Media[0].URL != "https://example.com/v.mp4" {
+		t.Errorf("Media = %+v, want exactly the one downloadable video", result.Media)
+	}
+}
+
+func TestParseBlocks_NoSkippedVideosOnHappyPath(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{
+			{Type: "high", URL: "https://example.com/v.mp4"},
+		}},
+	}
+	if got := ParseBlocks(blocks).SkippedVideos; got != 0 {
+		t.Errorf("SkippedVideos = %d, want 0", got)
+	}
+}
+
 func TestParseBlocks_ImageExtension(t *testing.T) {
 	blocks := []boosty.ContentBlock{
 		{Type: "image", URL: "https://images.boosty.to/image/abc.png"},
@@ -201,5 +237,36 @@ func TestParseBlocks_ImageExtensionWithQueryString(t *testing.T) {
 	}
 	if result.Media[1].Filename != "image_002.jpeg" {
 		t.Errorf("Media[1].Filename = %q, want image_002.jpeg (lowercase, query stripped)", result.Media[1].Filename)
+	}
+}
+
+// Unknown block types are collected (unique, first-seen order) instead of
+// being silently dropped — the syncer logs them so the user learns the
+// moment a blog uses a content kind b00p does not support yet (audio
+// attachments, files, whatever Boosty ships next).
+func TestParseBlocks_CollectsUnknownTypes(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "text", Content: `["hi","unstyled",[]]`},
+		{Type: "audio_file", URL: "https://example.com/a.mp3"},
+		{Type: "audio_file", URL: "https://example.com/b.mp3"},
+		{Type: "file", URL: "https://example.com/doc.pdf"},
+	}
+	got := ParseBlocks(blocks)
+	want := []string{"audio_file", "file"}
+	if !slices.Equal(got.UnknownTypes, want) {
+		t.Errorf("UnknownTypes = %v, want %v (unique, first-seen order)", got.UnknownTypes, want)
+	}
+}
+
+func TestParseBlocks_NoUnknownTypesOnKnownBlocks(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "text", Content: `["hi","unstyled",[]]`},
+		{Type: "image", URL: "https://example.com/i.jpg"},
+		{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{{Type: "high", URL: "https://example.com/v.mp4"}}},
+		{Type: "video", URL: "https://youtube.com/watch?v=1"},
+		{Type: "link", URL: "https://example.com"},
+	}
+	if got := ParseBlocks(blocks).UnknownTypes; len(got) != 0 {
+		t.Errorf("UnknownTypes = %v, want empty for fully supported blocks", got)
 	}
 }

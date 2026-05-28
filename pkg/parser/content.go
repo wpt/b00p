@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -21,6 +22,19 @@ type MediaItem struct {
 type ParsedContent struct {
 	TextParts []string
 	Media     []MediaItem
+	// SkippedVideos counts ok_video blocks that had no usable MP4 URL
+	// (only HLS/DASH variants, or every MP4 URL was empty). The block was
+	// silently dropped — without an explicit count, the user gets fewer
+	// videos than the source had and no warning that anything is missing.
+	// Callers should log when SkippedVideos > 0 so the user can decide to
+	// grab the missing video via yt-dlp on the HLS source or report it.
+	SkippedVideos int
+	// UnknownTypes lists block types ParseBlocks does not handle (unique,
+	// in first-seen order). Boosty has content kinds b00p never met yet —
+	// audio posts, file attachments — and silently dropping them would
+	// leave an invisible hole in the archive. Callers should log the list
+	// so the user learns support is missing the moment it matters.
+	UnknownTypes []string
 }
 
 // mp4QualityRank defines preference order for direct MP4 formats
@@ -92,6 +106,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			vidIdx++
 			vidURL := BestMP4URL(block.PlayerURLs)
 			if vidURL == "" {
+				result.SkippedVideos++
 				continue
 			}
 			filename := fmt.Sprintf("video_%03d.mp4", vidIdx)
@@ -118,6 +133,11 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 					text = block.URL
 				}
 				result.TextParts = append(result.TextParts, fmt.Sprintf("[%s](%s)", text, block.URL))
+			}
+
+		default:
+			if !slices.Contains(result.UnknownTypes, block.Type) {
+				result.UnknownTypes = append(result.UnknownTypes, block.Type)
 			}
 		}
 	}
