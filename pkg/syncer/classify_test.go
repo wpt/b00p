@@ -211,6 +211,68 @@ func TestClassifyPost_FileMissingAPIZero_NoNewComments(t *testing.T) {
 	}
 }
 
+// CommentsCapped suppression is one-directional. disk < API on a capped post
+// stays quiet (catch-up is structurally impossible — the endpoint can never
+// return more than the cap), but disk > API still fires: the author deleted
+// comments, and the refetch both drops the orphaned threads and re-evaluates
+// the flag. Removing the suppression (refetch noise on every sync, forever)
+// and making it bidirectional (deletions never heal) must both fail here.
+func TestClassifyPost_CappedDiskBelowAPI_Suppressed(t *testing.T) {
+	blogDir := t.TempDir()
+	postDir := filepath.Join(blogDir, "post-dir")
+	os.MkdirAll(postDir, 0755)
+	os.WriteFile(filepath.Join(postDir, "comments.json"),
+		[]byte(`[{"id":"1"},{"id":"2"},{"id":"3"}]`), 0644)
+
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	st.Add("post1", state.PostEntry{
+		DirName:        "post-dir",
+		HasComments:    true,
+		CommentsCapped: true,
+		CommentsCount:  120,
+		UpdatedAt:      100,
+	})
+
+	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
+	post.Count.Comments = 120 // far above disk: the unreachable catch-up case
+
+	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	if got.NewComments {
+		t.Error("NewComments = true, want false (capped post with disk < API must stay suppressed)")
+	}
+}
+
+func TestClassifyPost_CappedDiskAboveAPI_StillFires(t *testing.T) {
+	blogDir := t.TempDir()
+	postDir := filepath.Join(blogDir, "post-dir")
+	os.MkdirAll(postDir, 0755)
+	os.WriteFile(filepath.Join(postDir, "comments.json"),
+		[]byte(`[{"id":"1"},{"id":"2"},{"id":"3"},{"id":"4"},{"id":"5"}]`), 0644)
+
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	st.Add("post1", state.PostEntry{
+		DirName:        "post-dir",
+		HasComments:    true,
+		CommentsCapped: true,
+		CommentsCount:  120,
+		UpdatedAt:      100,
+	})
+
+	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
+	post.Count.Comments = 3 // deletions pushed API below disk
+
+	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	if !got.NewComments {
+		t.Error("NewComments = false, want true (deletions must fire even for capped posts so the flag can heal)")
+	}
+}
+
 // HasComments=false → preserves legacy state-vs-API count comparison.
 // We have no comments.json to consult for posts the user opted out of.
 func TestClassifyPost_HasCommentsFalse_FallsBackToStateCheck(t *testing.T) {
@@ -491,9 +553,11 @@ func TestSyncItem_Detail_CommentsFromDisk(t *testing.T) {
 	}
 }
 
-func TestSyncItem_Detail_CommentsFromCachedWhenDiskMissing(t *testing.T) {
-	// HasComments=true but disk file missing (DiskCommentCount = -1) → fall
-	// back to cached state count for display.
+func TestSyncItem_Detail_CommentsFileMissingNamesTheReason(t *testing.T) {
+	// HasComments=true but disk file missing (DiskCommentCount = -1): the
+	// trigger fired on the missing file, not a count delta, so the detail
+	// names the real reason. A "comments: 7 → 9" (or worse, "9 → 9" when
+	// the API count is unchanged) would read as a spurious no-op.
 	item := syncItem{
 		Existing:         state.PostEntry{HasComments: true, CommentsCount: 7},
 		DiskCommentCount: -1,
@@ -501,8 +565,12 @@ func TestSyncItem_Detail_CommentsFromCachedWhenDiskMissing(t *testing.T) {
 	}
 	item.Post.Count.Comments = 9
 
-	if got := item.Detail(); !strings.Contains(got, "comments: 7 → 9") {
-		t.Errorf("Detail = %q, want cached count (7) when disk missing", got)
+	got := item.Detail()
+	if !strings.Contains(got, "comments.json missing or unreadable (API: 9)") {
+		t.Errorf("Detail = %q, want the missing-file reason with the API count", got)
+	}
+	if strings.Contains(got, "→") {
+		t.Errorf("Detail = %q, must not render a from→to pair for a missing file", got)
 	}
 }
 

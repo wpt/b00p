@@ -94,15 +94,26 @@ func (s syncItem) Detail() string {
 		parts = append(parts, "post edited")
 	}
 	if s.NewComments {
-		// Prefer the disk count when available — that's the value the trigger
-		// fired on, and is what the user actually has locally. Fall back to the
-		// state-cached count for posts that never had comments tracked.
-		from := s.Existing.CommentsCount
-		if s.Existing.HasComments && s.DiskCommentCount >= 0 {
-			from = s.DiskCommentCount
+		switch {
+		case s.Existing.HasComments && s.DiskCommentCount < 0:
+			// The trigger fired because comments.json is missing/unreadable,
+			// not because of a count delta — a "N → N" line would read as a
+			// spurious no-op. Name the real reason instead.
+			parts = append(parts, fmt.Sprintf(
+				"comments.json missing or unreadable (API: %d); refetching",
+				s.Post.Count.Comments))
+		default:
+			// Prefer the disk count when available — that's the value the
+			// trigger fired on, and is what the user actually has locally.
+			// Fall back to the state-cached count for posts that never had
+			// comments tracked.
+			from := s.Existing.CommentsCount
+			if s.Existing.HasComments && s.DiskCommentCount >= 0 {
+				from = s.DiskCommentCount
+			}
+			parts = append(parts, fmt.Sprintf("comments: %d → %d",
+				from, s.Post.Count.Comments))
 		}
-		parts = append(parts, fmt.Sprintf("comments: %d → %d",
-			from, s.Post.Count.Comments))
 	}
 	if s.VideoMismatch != "" {
 		parts = append(parts, s.VideoMismatch)
@@ -170,10 +181,34 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 	// For posts the user never asked to track comments (HasComments=false) we
 	// have no disk file to consult, so fall back to the legacy state-vs-API
 	// comparison — preserves prior behavior for that case.
+	//
+	// CommentsCapped suppresses re-trigger when the prior save hit Boosty's
+	// structural ceiling (>100 top-level threads, or any thread with >100
+	// replies) — disk count can never catch up to API count, so a literal
+	// "n != post.Count.Comments" would fire on every sync forever.
+	//
+	// Suppression is one-directional: only when disk < API (the unreachable-
+	// catch-up case the cap was made for). If disk > API the author deleted
+	// comments and we need to re-fetch to drop the orphaned threads, even
+	// for previously-capped posts — refetch will rewrite CommentsCapped via
+	// buildSyncEntry based on the fresh result.
+	//
+	// Known leak: a capped post that gains a new top-level thread (count
+	// grows from cap+M to cap+M+1) stays suppressed too — disk is still
+	// below API, the cap is real, and we don't track per-thread deltas. The
+	// new thread will only be picked up if the post is edited (Edited path
+	// forces actions.Comments), if deletions push API below disk, or if the
+	// user deletes comments.json to force a refetch (the missing-file branch
+	// below bypasses suppression; note --check-files does NOT help here —
+	// detectMissingFiles only stats existence and comments.json exists).
+	// Acceptable for a downloader CLI: the alternative is refetching every
+	// capped post every sync with no path to closure, which is louder noise
+	// than this quiet undercount.
 	if existing.HasComments {
 		if n, ok := diskCommentCount(filepath.Join(blogDir, existing.DirName)); ok {
 			item.DiskCommentCount = n
-			if n != post.Count.Comments {
+			suppress := existing.CommentsCapped && n < post.Count.Comments
+			if n != post.Count.Comments && !suppress {
 				item.NewComments = true
 			}
 		} else {
