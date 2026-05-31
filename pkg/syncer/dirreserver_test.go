@@ -209,3 +209,64 @@ func TestDirReserver_KeySeparatorIsNUL(t *testing.T) {
 		t.Errorf("reserverKeySep = %q, want NUL (\\x00); NUL is the only byte forbidden in path components on all supported OSes", reserverKeySep)
 	}
 }
+
+// On case-insensitive filesystems (NTFS, APFS) the reservation key is folded:
+// two posts whose sanitized titles differ only in letter case would otherwise
+// both pass the in-memory check independently while MkdirAll quietly reopens
+// the same on-disk folder — the second post's writes clobber the first.
+// caseFoldFS is a package var (not a build tag) precisely so this data-loss
+// guard is pinned on every OS; the package has no t.Parallel, so swapping it
+// with a Cleanup restore is safe.
+func TestDirReserver_CaseFoldCollisionGetsSuffix(t *testing.T) {
+	saved := caseFoldFS
+	caseFoldFS = true
+	t.Cleanup(func() { caseFoldFS = saved })
+
+	dir := t.TempDir()
+	r := newDirReserver()
+
+	first := r.reserve(dir, "aaaaaaaa11", "Стрим")
+	second := r.reserve(dir, "bbbbbbbb22", "стрим")
+
+	if first != "Стрим" {
+		t.Errorf("first reserve = %q, want 'Стрим'", first)
+	}
+	if second != "стрим_bbbbbbbb" {
+		t.Errorf("second reserve = %q, want 'стрим_bbbbbbbb' (case-only collision must suffix on a folding FS)", second)
+	}
+}
+
+func TestDirReserver_CaseSensitiveFSKeepsBothNames(t *testing.T) {
+	saved := caseFoldFS
+	caseFoldFS = false
+	t.Cleanup(func() { caseFoldFS = saved })
+
+	dir := t.TempDir()
+	r := newDirReserver()
+
+	r.reserve(dir, "aaaaaaaa11", "Стрим")
+	if got := r.reserve(dir, "bbbbbbbb22", "стрим"); got != "стрим" {
+		t.Errorf("reserve = %q, want 'стрим' (case-sensitive FS: distinct names, no suffix)", got)
+	}
+}
+
+// The suffixed fallback candidate goes through the same memory+disk
+// validation as the base name. When both the base AND base_idprefix8 are
+// owned by other posts (8-char ID-prefix collision between same-base posts),
+// the reserver escalates to the full post ID instead of silently overwriting
+// the sibling's reservation.
+func TestDirReserver_SuffixCollisionEscalatesToFullID(t *testing.T) {
+	dir := t.TempDir()
+	r := newDirReserver()
+
+	r.reserve(dir, "aaaaaaaa11", "shared")          // owns the base name
+	r.reserve(dir, "bbbbbbbb22", "shared_cccccccc") // squats the next post's suffix candidate
+
+	if got := r.reserve(dir, "cccccccc33", "shared"); got != "shared_cccccccc33" {
+		t.Errorf("reserve = %q, want 'shared_cccccccc33' (suffixed candidate taken → full-ID suffix)", got)
+	}
+	// The squatter's reservation must survive untouched.
+	if again := r.reserve(dir, "bbbbbbbb22", "shared_cccccccc"); again != "shared_cccccccc" {
+		t.Errorf("squatter lost its reservation: got %q, want 'shared_cccccccc'", again)
+	}
+}
