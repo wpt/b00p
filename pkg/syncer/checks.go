@@ -170,7 +170,7 @@ func checkRemoteVideoSize(httpc *http.Client, ua string, log boosty.Logger,
 
 	resp, err := httpc.Do(req)
 	if err != nil {
-		log.Printf("  check-media %s: HEAD error: %v", filename, err)
+		log.Printf("  check-media %s: HEAD error: %v", filename, boosty.RedactURLError(err))
 		return ""
 	}
 	defer func() {

@@ -3,6 +3,7 @@ package syncer
 import (
 	"bufio"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -11,16 +12,17 @@ import (
 // confirmApply gates the apply phase of Sync behind a Y/N prompt.
 // With auto=true (Config.AutoApply), the prompt is skipped entirely so
 // headless callers (cron, nohup, scripts) can run without a TTY. The
-// prompt itself is written to stdout (so the user sees it on a real
-// terminal); only the structural log lines go through `log` so tests
-// can observe behavior via a fake logger without capturing stdout.
+// prompt is written to stderr like every other diagnostic — with stdout it
+// would vanish under `b00p ... > out.txt` redirection and the run would
+// appear to hang waiting on stdin. Only the structural log lines go through
+// `log` so tests can observe behavior via a fake logger.
 func confirmApply(log boosty.Logger, in *bufio.Reader, auto bool) bool {
 	log.Printf("")
 	if auto {
 		log.Printf("Auto-applying (--yes).")
 		return true
 	}
-	fmt.Print("Apply changes? [y/N] ")
+	fmt.Fprint(os.Stderr, "Apply changes? [y/N] ")
 	answer, err := in.ReadString('\n')
 	if err != nil {
 		log.Printf("  warning: failed to read confirmation: %v", err)
@@ -62,7 +64,10 @@ func displaySync(log boosty.Logger, items []syncItem) {
 		if item.Missing.Any() {
 			k.filesMissing++
 		}
-		if !item.IsActionable() {
+		// LOCKED_NEW posts already show up in the "locked (no access)" line;
+		// counting them under "no changes" too would make the summary lines
+		// sum to more than the post total.
+		if !item.IsActionable() && !item.IsLockedNew {
 			k.noChange++
 		}
 	}

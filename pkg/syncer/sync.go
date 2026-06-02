@@ -2,11 +2,13 @@ package syncer
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/state"
 )
 
@@ -29,10 +31,22 @@ func (e *Engine) Sync() error {
 	}
 
 	// Phase 1: Fetch and classify.
+	//
+	// Two error shapes from FetchPosts:
+	//   - ErrFetchPage: page-level GET failed (transport, 5xx-after-retries,
+	//     refresh rejected). The iterator has already terminated. Abort
+	//     the sync — silently exiting 0 when posts could not even be listed
+	//     is exactly the cron-failure mode this guard exists to prevent.
+	//   - any other error: per-post parse failure inside a successful page;
+	//     iterator continues, we log and skip just that item.
 	var items []syncItem
 	for post, err := range c.FetchPosts(e.cfg.Blog, 20) {
 		if err != nil {
-			return err
+			if errors.Is(err, boosty.ErrFetchPage) {
+				return fmt.Errorf("fetch posts: %w", err)
+			}
+			c.Log.Printf("  warning: skipping malformed post: %v", err)
+			continue
 		}
 		items = append(items, classifyPost(post, st, blogDir, e.cfg.DirFormat))
 	}
@@ -46,9 +60,15 @@ func (e *Engine) Sync() error {
 	if e.cfg.CheckFiles {
 		c.Log.Printf("Checking files on disk...")
 		for i := range items {
-			// Skip cases that already trigger a full re-download in apply.
-			if !items[i].InState ||
-				items[i].JustLocked || items[i].IsLockedNew ||
+			// Skip cases that already trigger a full re-download in apply
+			// (JustUnlocked), aren't in state at all, or have no access.
+			// !HasAccess covers newly locked, locked-new AND still-locked
+			// posts: none of them can be repaired — the per-post endpoint
+			// returns a stub that fetchFullPost rejects — so flagging
+			// Missing.* on them would queue a guaranteed-failing apply on
+			// every run (and a permanent non-zero exit for cron). Mirrors
+			// runCheckMedia's guard in checks.go.
+			if !items[i].InState || !items[i].Post.HasAccess ||
 				items[i].JustUnlocked {
 				continue
 			}
@@ -82,6 +102,9 @@ func (e *Engine) Sync() error {
 				c.Log.Printf("  warning: failed to save state: %v", err)
 			}
 		}
+		// Regenerate the index even on a no-change run so a deleted
+		// index.md self-heals without waiting for actual updates.
+		e.writeBlogIndex(blogDir, st)
 		c.Log.Printf("Everything up to date.")
 		return nil
 	}
@@ -100,15 +123,35 @@ func (e *Engine) Sync() error {
 	}
 
 	// Apply backfills before per-item changes; per-item updates use the
-	// already-corrected st.Posts entries.
+	// already-corrected st.Posts entries. Persist now so the backfill
+	// survives even if every actionable worker fails before reaching its
+	// own st.Save — otherwise legacy UpdatedAt=0 entries would silently
+	// be re-backfilled on every run.
 	applyBackfill(st, items)
-
-	// Phase 4: apply.
-	c.Log.Printf("Applying...")
-	for _, item := range items {
-		e.applyItem(blogDir, st, item)
+	if err := st.Save(); err != nil {
+		c.Log.Printf("  warning: failed to save backfill: %v", err)
 	}
 
+	// Phase 4: apply. Runs through the worker pool so --workers > 1 actually
+	// parallelizes sync (previously only DownloadAll honored the flag). Each
+	// apply helper takes short critical sections around its st.Posts read
+	// and st.Add/st.Save write via e.stMu — the lock is never held across
+	// HTTP downloads or file writes, so parallelism stays effective.
+	c.Log.Printf("Applying...")
+	e.failedPosts.Store(0)
+	runWorkerPool(e.cfg.Workers, items, func(item syncItem) {
+		e.applyItem(blogDir, st, item)
+	})
+
+	// Index reflects whatever state the apply phase managed to persist —
+	// written even when some posts failed (their entries simply aren't in
+	// state yet and show up after the retrying sync).
+	e.writeBlogIndex(blogDir, st)
+
+	if failed := e.failedPosts.Load(); failed > 0 {
+		c.Log.Printf("Sync finished with %d failed post(s).", failed)
+		return fmt.Errorf("%d post(s) failed; see log above", failed)
+	}
 	c.Log.Printf("Sync complete.")
 	return nil
 }
