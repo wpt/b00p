@@ -10,6 +10,8 @@ package syncer
 
 import (
 	"io"
+	"sync"
+	"sync/atomic"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/parser"
@@ -53,9 +55,9 @@ type Config struct {
 	// Required for headless runs (cron, nohup, scripts without a TTY).
 	AutoApply bool
 
-	// Workers is the parallelism for DownloadAll and CheckMedia.
-	// Values <1 are clamped to 1; values above the per-call job count are
-	// clamped down.
+	// Workers is the parallelism for DownloadAll, the Sync apply phase, and
+	// CheckMedia HEAD requests. Values <1 are clamped to 1; values above
+	// the per-call job count are clamped down.
 	Workers int
 
 	// In is the source of confirmation answers when AutoApply is false.
@@ -66,10 +68,24 @@ type Config struct {
 
 // Engine binds a Client + Config and exposes the three top-level operations:
 // SavePost, DownloadAll, Sync. Construct via New; do not zero-initialize.
+//
+// stMu guards state.State map access across apply helpers when Sync runs
+// through the worker pool (--workers > 1). Each helper takes a short
+// critical section around the st.Posts read and the st.Add/st.Save pair,
+// holding the lock only across map and disk-write operations — never
+// across HTTP downloads or file writes.
+//
+// failedPosts counts per-post apply failures during the current Sync /
+// DownloadAll. Workers log their own errors and return; the orchestrator
+// reads this counter at the end and converts a non-zero count into the
+// top-level error so a cron / --sync --yes run exits non-zero on real
+// failures instead of silently reporting success.
 type Engine struct {
-	c   *boosty.Client
-	cfg Config
-	res *dirReserver
+	c           *boosty.Client
+	cfg         Config
+	res         *dirReserver
+	stMu        sync.Mutex
+	failedPosts atomic.Int64
 }
 
 // New returns an Engine ready to operate on cfg.Blog using c. The returned

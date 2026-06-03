@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,7 +44,7 @@ func TestEngine_SavePost_HappyPathWritesAllArtefacts(t *testing.T) {
 	}
 	e := New(f.client, cfg)
 
-	dirName, err := e.SavePost(&post)
+	dirName, _, err := e.SavePost(&post)
 	if err != nil {
 		t.Fatalf("SavePost: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestEngine_SavePost_NoAccessIsNoOp(t *testing.T) {
 	cfg := Config{Blog: "myblog", OutputDir: t.TempDir(), WithMD: true}
 	e := New(f.client, cfg)
 
-	dirName, err := e.SavePost(&post)
+	dirName, _, err := e.SavePost(&post)
 	if err != nil {
 		t.Fatalf("SavePost: %v", err)
 	}
@@ -281,6 +282,325 @@ func TestEngine_ApplyItem_EditedMdFailurePreservesUpdatedAt(t *testing.T) {
 	}
 	if !got.HasMd {
 		t.Error("HasMd = false, want true (prior tracking must be preserved when this run did not write md)")
+	}
+}
+
+// --- fetchFullPost stub guard ---
+//
+// The per-post endpoint can return a degraded payload (HasAccess=false or
+// empty Data) when the subscription lapses between the list call and the
+// per-post call. Without the guard, the stub would be written over good
+// post.json, empty Data would parse into zero media (trivially "succeeding"),
+// every channel would tick OK, and buildSyncEntry would advance UpdatedAt —
+// permanent on-disk damage no later sync could detect.
+
+func TestEngine_ApplyItem_StubPostPreservesDiskAndState(t *testing.T) {
+	stubs := map[string]boosty.Post{
+		"no_access": {ID: "p1", Title: "new", HasAccess: false, UpdatedAt: 200,
+			Data: []boosty.ContentBlock{{Type: "text", Content: `["x","unstyled",[]]`}}},
+		"empty_data": {ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200},
+	}
+	for name, stub := range stubs {
+		t.Run(name, func(t *testing.T) {
+			blog := "myblog"
+			f := newFakeAPI(t)
+			outDir := t.TempDir()
+			blogDir := filepath.Join(outDir, blog)
+			postDir := filepath.Join(blogDir, "p1_dir")
+			mustMkdir(t, postDir)
+			writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","title":"good payload"}`)
+			writeInitialState(t, blogDir, map[string]state.PostEntry{
+				"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100},
+			})
+			f.SinglePost(blog, "p1", stub)
+
+			e := New(f.client, Config{Blog: blog, OutputDir: outDir})
+			st, err := state.Load(blogDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := syncItem{
+				Post:     boosty.Post{ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200},
+				DirName:  "p1_dir",
+				Existing: st.Posts["p1"],
+				InState:  true,
+				Edited:   true,
+			}
+			e.applyItem(blogDir, st, item)
+
+			pj, _ := os.ReadFile(filepath.Join(postDir, "post.json"))
+			if !strings.Contains(string(pj), "good payload") {
+				t.Errorf("post.json was overwritten by the stub: %s", pj)
+			}
+			reloaded, _ := state.Load(blogDir)
+			if got := reloaded.Posts["p1"].UpdatedAt; got != 100 {
+				t.Errorf("UpdatedAt = %d, want 100 (a stub must never advance state)", got)
+			}
+			if got := e.failedPosts.Load(); got != 1 {
+				t.Errorf("failedPosts = %d, want 1 (skipped apply must surface as a failure)", got)
+			}
+		})
+	}
+}
+
+// MaybeRefreshSignedURLs carries the same stub guard: a degraded per-post
+// payload must not replace the (complete) list-endpoint copy.
+func TestMaybeRefreshSignedURLs_StubKeepsListPayload(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	f.SinglePost(blog, "p1", boosty.Post{ID: "p1", HasAccess: false}) // stub
+
+	listPost := boosty.Post{
+		ID: "p1", Title: "from list", HasAccess: true,
+		Data: []boosty.ContentBlock{{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{
+			{Type: "high", URL: "https://cdn.example/v.mp4"},
+		}}},
+	}
+	e := New(f.client, Config{Blog: blog, OutputDir: t.TempDir()})
+	got := e.MaybeRefreshSignedURLs(&listPost)
+	if got.Title != "from list" || !got.HasAccess {
+		t.Errorf("stub must fall back to the list-endpoint payload, got %+v", got)
+	}
+}
+
+// --- applyJustUnlocked: Locked clears only when every channel landed ---
+//
+// A tier-toggle lock with no content edit has no other re-trigger path
+// (UpdatedAt unchanged → not Edited; Locked already false → not
+// JustUnlocked), so clearing Locked on partial success would strand stale
+// artefacts forever. These tests pin the all-channels-OK coupling end to end.
+
+func TestEngine_ApplyItem_UnlockedAllOKClearsLocked(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","title":"stale pre-lock"}`)
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100, Locked: true},
+	})
+
+	fresh := boosty.Post{
+		ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200,
+		Data: []boosty.ContentBlock{{Type: "text", Content: `["body","unstyled",[]]`}},
+	}
+	f.SinglePost(blog, "p1", fresh)
+
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir})
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := syncItem{
+		Post:         fresh,
+		DirName:      "p1_freshname", // classify re-derived name; surviving dir must win
+		Existing:     st.Posts["p1"],
+		InState:      true,
+		JustUnlocked: true,
+	}
+	e.applyItem(blogDir, st, item)
+
+	reloaded, _ := state.Load(blogDir)
+	got := reloaded.Posts["p1"]
+	if got.Locked {
+		t.Error("Locked = true, want false (every channel succeeded)")
+	}
+	if got.UpdatedAt != 200 {
+		t.Errorf("UpdatedAt = %d, want 200", got.UpdatedAt)
+	}
+	if got.DirName != "p1_dir" {
+		t.Errorf("DirName = %q, want 'p1_dir' (surviving on-disk dir must be reused, not orphaned)", got.DirName)
+	}
+	if n := e.failedPosts.Load(); n != 0 {
+		t.Errorf("failedPosts = %d, want 0", n)
+	}
+}
+
+func TestEngine_ApplyItem_UnlockedPartialFailureKeepsLocked(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","title":"stale pre-lock"}`)
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		// HasComments=true forces the comments channel; its endpoint is NOT
+		// registered below, so the fetch 404s and the channel fails.
+		"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100, Locked: true, HasComments: true},
+	})
+
+	fresh := boosty.Post{
+		ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200,
+		Data: []boosty.ContentBlock{{Type: "text", Content: `["body","unstyled",[]]`}},
+	}
+	f.SinglePost(blog, "p1", fresh)
+	// CommentsList intentionally not registered → 404 → CommentsOK=false.
+
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir})
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := syncItem{
+		Post:         fresh,
+		DirName:      "p1_dir",
+		Existing:     st.Posts["p1"],
+		InState:      true,
+		JustUnlocked: true,
+	}
+	e.applyItem(blogDir, st, item)
+
+	reloaded, _ := state.Load(blogDir)
+	got := reloaded.Posts["p1"]
+	if !got.Locked {
+		t.Error("Locked = false, want true (partial failure must keep the JustUnlocked trigger armed)")
+	}
+	if got.UpdatedAt != 100 {
+		t.Errorf("UpdatedAt = %d, want 100 (must not advance on partial failure)", got.UpdatedAt)
+	}
+	// One failed post = exactly one failedPosts increment, even though both
+	// an artefact channel failed AND state was saved afterwards.
+	if n := e.failedPosts.Load(); n != 1 {
+		t.Errorf("failedPosts = %d, want exactly 1 per failed post", n)
+	}
+}
+
+// --- applyUpdate: directory reservation under contention ---
+//
+// applyUpdate reserves item.DirName through the dirReserver so a same-run
+// colliding NEW post cannot claim this post's directory while its post.json
+// is missing (the Missing.PostJSON repair window, where the disk probe
+// reports the dir as free). The load-bearing coupling: the RESERVED name —
+// possibly suffixed — must feed both the artefact writes and the state
+// entry. A drift that writes to the suffixed dir but records item.DirName
+// (or vice versa) would split disk from state and reinstate the cross-post
+// interleaving this wiring exists to prevent.
+func TestEngine_ApplyUpdate_ReservedDirGetsSuffix(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	mustMkdir(t, blogDir)
+	// In state, but NO post.json on disk — the repair window.
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"aaaabbbbcccc": {Title: "old", DirName: "shared", UpdatedAt: 100, HasComments: true},
+	})
+	f.CommentsList(blog, "aaaabbbbcccc", boosty.Comment{ID: "c1"})
+
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir})
+	// Simulate the same-run colliding NEW post that already claimed "shared".
+	e.res.reserve(blogDir, "otherpost99", "shared")
+
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := syncItem{
+		Post: boosty.Post{
+			ID: "aaaabbbbcccc", Title: "new", HasAccess: true, UpdatedAt: 100,
+			Count: boosty.PostCount{Comments: 1},
+		},
+		DirName:     "shared",
+		Existing:    st.Posts["aaaabbbbcccc"],
+		InState:     true,
+		NewComments: true, // comments-only trigger: no per-post fetch needed
+	}
+	e.applyItem(blogDir, st, item)
+
+	const want = "shared_aaaabbbb"
+	requireFile(t, filepath.Join(blogDir, want, "comments.json"))
+	if _, err := os.Stat(filepath.Join(blogDir, "shared", "comments.json")); !os.IsNotExist(err) {
+		t.Errorf("comments.json written into the contested 'shared' dir, stat err = %v", err)
+	}
+	reloaded, _ := state.Load(blogDir)
+	if got := reloaded.Posts["aaaabbbbcccc"].DirName; got != want {
+		t.Errorf("state DirName = %q, want %q (must record the same reserved name the artefacts used)", got, want)
+	}
+}
+
+// --- downloadComments: cap detection at the structural boundary ---
+//
+// commentsPageLimit=101 exists so a post with EXACTLY 100 top-level threads
+// (uncapped) is distinguishable from one that hit the cap. A flipped
+// comparison here silently sets commentsCapped on boundary posts and
+// permanently suppresses their comment refetch; the per-thread signal
+// (replyCount > inlined replies) is the only way reply truncation is ever
+// detected.
+func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
+	mk := func(n int) []boosty.Comment {
+		cs := make([]boosty.Comment, n)
+		for i := range cs {
+			cs[i] = boosty.Comment{ID: fmt.Sprintf("c%d", i)}
+		}
+		return cs
+	}
+	cases := []struct {
+		name     string
+		comments []boosty.Comment
+		want     bool
+	}{
+		{"exactly_100_uncapped", mk(100), false},
+		{"101_capped", mk(101), true},
+		{"reply_undercount_capped", []boosty.Comment{
+			{ID: "c1", ReplyCount: 5, Replies: &boosty.CommentsResponse{
+				Data: []boosty.Comment{{ID: "r1"}},
+			}},
+		}, true},
+		{"replies_fully_inlined_uncapped", []boosty.Comment{
+			{ID: "c1", ReplyCount: 1, Replies: &boosty.CommentsResponse{
+				Data: []boosty.Comment{{ID: "r1"}},
+			}},
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blog := "myblog"
+			f := newFakeAPI(t)
+			f.CommentsList(blog, "p1", tc.comments...)
+			e := New(f.client, Config{Blog: blog, OutputDir: t.TempDir()})
+
+			dir := t.TempDir()
+			capped, err := e.downloadComments("p1", dir, len(tc.comments))
+			if err != nil {
+				t.Fatalf("downloadComments: %v", err)
+			}
+			if capped != tc.want {
+				t.Errorf("capped = %v, want %v", capped, tc.want)
+			}
+			requireFile(t, filepath.Join(dir, "comments.json"))
+		})
+	}
+}
+
+// buildSyncEntry rewrites CommentsCapped from the fresh fetch — but ONLY
+// when comments were actually written this run; otherwise the prior flag
+// must survive (clearing it without a fetch would re-enable the futile
+// refetch loop the flag suppresses).
+func TestBuildSyncEntry_CommentsCappedFollowsFreshFetch(t *testing.T) {
+	post := &boosty.Post{Title: "t"}
+	allOK := applyOutcome{PostJSONOK: true, MediaOK: true, MDOK: true, CommentsOK: true}
+
+	fetchedUncapped := allOK
+	fetchedUncapped.CommentsWritten = true
+	fetchedUncapped.CommentsCapped = false
+	if e := buildSyncEntry(state.PostEntry{CommentsCapped: true, HasComments: true},
+		post, "d", false, fetchedUncapped); e.CommentsCapped {
+		t.Error("CommentsCapped = true, want false (fresh uncapped fetch must clear the flag)")
+	}
+
+	fetchedCapped := allOK
+	fetchedCapped.CommentsWritten = true
+	fetchedCapped.CommentsCapped = true
+	if e := buildSyncEntry(state.PostEntry{}, post, "d", false, fetchedCapped); !e.CommentsCapped {
+		t.Error("CommentsCapped = false, want true (capped fetch must set the flag)")
+	}
+
+	if e := buildSyncEntry(state.PostEntry{CommentsCapped: true, HasComments: true},
+		post, "d", false, allOK); !e.CommentsCapped {
+		t.Error("CommentsCapped = false, want true (no comments written this run → prior flag survives)")
 	}
 }
 
