@@ -98,6 +98,37 @@ func TestBoostyURLRe(t *testing.T) {
 			name: "missing_post_segment",
 			url:  "https://boosty.to/alice",
 		},
+		// Anchoring regressions: the regex must match the HOST, not any
+		// substring. Unanchored, all three below were accepted and produced
+		// a confusing API 404 instead of a clean "invalid boosty URL".
+		{
+			name: "embedded_in_other_host",
+			url:  "https://evilboosty.to/alice/posts/abc-123",
+		},
+		{
+			name: "smuggled_in_query",
+			url:  "https://evil.com/?next=boosty.to/alice/posts/abc-123",
+		},
+		{
+			name: "smuggled_in_fragment",
+			url:  "https://evil.com/#boosty.to/alice/posts/abc-123",
+		},
+		// Legitimate host spellings that must keep working after anchoring.
+		{
+			name:     "www_prefix",
+			url:      "https://www.boosty.to/alice/posts/abc-123",
+			wantBlog: "alice", wantID: "abc-123", wantOK: true,
+		},
+		{
+			name:     "mobile_prefix_no_scheme",
+			url:      "m.boosty.to/alice/posts/abc-123",
+			wantBlog: "alice", wantID: "abc-123", wantOK: true,
+		},
+		{
+			name:     "plain_http",
+			url:      "http://boosty.to/alice/posts/abc-123",
+			wantBlog: "alice", wantID: "abc-123", wantOK: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -44,7 +45,7 @@ func runStat(cmd *cobra.Command, args []string) error {
 			if strings.EqualFold(sub.Blog.BlogURL, statBlog) {
 				fmt.Printf("  Blog:   %s\n", sub.Blog.BlogURL)
 				fmt.Printf("  Tier:   %s\n", sub.Name)
-				fmt.Printf("  Price:  %d RUB\n", sub.Price)
+				fmt.Printf("  Price:  %g RUB\n", sub.Price)
 				if sub.IsPaused {
 					fmt.Println("  Status: PAUSED")
 				} else {
@@ -68,7 +69,14 @@ func runStat(cmd *cobra.Command, args []string) error {
 
 	for post, err := range c.FetchPosts(statBlog, 20) {
 		if err != nil {
-			return err
+			// Same abort-vs-skip contract as DownloadAll/Sync: a page-level
+			// failure kills the run, a single malformed post is skipped so
+			// one drifted JSON shape doesn't kill stats for the whole blog.
+			if errors.Is(err, boosty.ErrFetchPage) {
+				return err
+			}
+			c.Log.Printf("  warning: skipping malformed post: %v", err)
+			continue
 		}
 		totalPosts++
 		if post.HasAccess {

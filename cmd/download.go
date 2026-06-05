@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/parser"
@@ -49,7 +50,11 @@ func init() {
 }
 
 var (
-	boostyURLRe = regexp.MustCompile(`boosty\.to/([^/]+)/posts/([^/?#]+)`)
+	// boostyURLRe is anchored at the start so the host is the real host —
+	// unanchored, any string CONTAINING "boosty.to/x/posts/y" matched too
+	// (evilboosty.to, boosty.to inside another URL's query/fragment) and the
+	// run proceeded to a confusing API 404 instead of a clean rejection.
+	boostyURLRe = regexp.MustCompile(`^(?:https?://)?(?:www\.|m\.)?boosty\.to/([^/]+)/posts/([^/?#]+)`)
 	// blogNameRe limits the URL-derived blog slug to safe path characters.
 	// Boosty usernames are alphanumeric + hyphen + underscore in practice;
 	// the regex blocks "..", "CON", and any FS-significant character before
@@ -88,11 +93,64 @@ func buildConfig(blog string) syncer.Config {
 }
 
 func runDownload(cmd *cobra.Command, args []string) error {
+	// URLs pasted from chat/docs into a quoted arg routinely carry edge
+	// whitespace. A leading space would fail the anchored regex with a
+	// rejection message where the space is invisible; a trailing space
+	// would ride into the post-id capture and produce a confusing API 404.
+	postURL = strings.TrimSpace(postURL)
 	if blogName == "" && postURL == "" {
 		return fmt.Errorf("specify --blog or --url")
 	}
+	if blogName != "" && postURL != "" {
+		return fmt.Errorf("--blog and --url are mutually exclusive")
+	}
 	if blogName != "" && !blogNameRe.MatchString(blogName) {
 		return fmt.Errorf("invalid --blog %q: must match %s", blogName, blogNameRe)
+	}
+
+	// Flag-combination guards: silently no-op flags train the user to add
+	// them defensively without understanding what they do. Fail loud.
+	if postURL != "" {
+		var bad []string
+		if syncMode {
+			bad = append(bad, "--sync")
+		}
+		if checkMedia {
+			bad = append(bad, "--check-media")
+		}
+		if checkFilesFlag {
+			bad = append(bad, "--check-files")
+		}
+		if autoApply {
+			bad = append(bad, "--yes")
+		}
+		if forceDownload {
+			bad = append(bad, "--force")
+		}
+		if numWorkers > 1 {
+			bad = append(bad, "--workers")
+		}
+		if len(bad) > 0 {
+			return fmt.Errorf("--url is single-post and cannot be combined with: %v", bad)
+		}
+	}
+	if !syncMode {
+		var bad []string
+		if checkMedia {
+			bad = append(bad, "--check-media")
+		}
+		if checkFilesFlag {
+			bad = append(bad, "--check-files")
+		}
+		if autoApply {
+			bad = append(bad, "--yes")
+		}
+		if len(bad) > 0 {
+			return fmt.Errorf("requires --sync: %v", bad)
+		}
+	}
+	if syncMode && forceDownload {
+		return fmt.Errorf("--force is only honored without --sync; sync already detects what needs updating")
 	}
 
 	c, err := newClient()
@@ -103,7 +161,7 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	if postURL != "" {
 		matches := boostyURLRe.FindStringSubmatch(postURL)
 		if matches == nil {
-			return fmt.Errorf("invalid boosty URL: %s", postURL)
+			return fmt.Errorf("invalid boosty URL: %s (expected https://boosty.to/{blog}/posts/{post-id})", postURL)
 		}
 		blog := matches[1]
 		postID := matches[2]
@@ -115,7 +173,15 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		if err := c.GetJSON(boosty.PostURL(blog, postID), &post); err != nil {
 			return fmt.Errorf("fetch post: %w", err)
 		}
-		_, err := syncer.New(c, buildConfig(blog)).SavePost(&post)
+		// Stub guard: per-post endpoint may return a degraded payload (no
+		// access, empty Data) when the post is locked or the subscription
+		// lapsed. SavePost would otherwise write an empty post.json + zero-
+		// length post.md against a stub. Same guard as fetchFullPost and
+		// MaybeRefreshSignedURLs apply on the sync path.
+		if !post.HasAccess || len(post.Data) == 0 {
+			return fmt.Errorf("post %s not accessible (locked, deleted, or subscription lapsed)", postID)
+		}
+		_, _, err := syncer.New(c, buildConfig(blog)).SavePost(&post)
 		return err
 	}
 
