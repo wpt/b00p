@@ -61,7 +61,7 @@ func TestState_AddWithAllFields(t *testing.T) {
 
 	entry, _ := s.Get("abc")
 	if entry.Price != 20 {
-		t.Errorf("Price = %d, want 20", entry.Price)
+		t.Errorf("Price = %g, want 20", entry.Price)
 	}
 	if entry.Tier != "tier_2" {
 		t.Errorf("Tier = %q, want 'tier_2'", entry.Tier)
@@ -127,7 +127,7 @@ func TestState_SaveAndLoad(t *testing.T) {
 	}
 	e, _ := loaded.Get("post-1")
 	if e.Price != 20 {
-		t.Errorf("loaded post-1 Price = %d, want 20", e.Price)
+		t.Errorf("loaded post-1 Price = %g, want 20", e.Price)
 	}
 	if e.Tier != "tier_2" {
 		t.Errorf("loaded post-1 Tier = %q, want 'tier_2'", e.Tier)
@@ -301,5 +301,60 @@ func TestWriteFileAtomic_TempCleanupOnRenameFailure(t *testing.T) {
 		if name != "state.json" {
 			t.Errorf("unexpected leftover file after failed write: %q", name)
 		}
+	}
+}
+
+// Save stamps the current schema version; a legacy file (no version field)
+// loads as version 0 and upgrades on the next Save.
+func TestState_SaveStampsCurrentVersion(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add("p1", PostEntry{Title: "x", DirName: "d"})
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Version != CurrentVersion {
+		t.Errorf("Version = %d, want %d", loaded.Version, CurrentVersion)
+	}
+}
+
+func TestState_LoadLegacyFileWithoutVersion(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `{"posts":{"p":{"title":"t","dirName":"d"}},"lastSync":"2025-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(legacy), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load(dir)
+	if err != nil {
+		t.Fatalf("legacy (pre-version) state file must load cleanly: %v", err)
+	}
+	if s.Version != 0 {
+		t.Errorf("Version = %d, want 0 for a legacy file", s.Version)
+	}
+	if !s.Has("p") {
+		t.Error("legacy entries lost on load")
+	}
+}
+
+// A file written by a NEWER b00p must be rejected: this version would drop
+// the unknown fields of the newer schema on its next Save.
+func TestState_LoadRejectsNewerVersion(t *testing.T) {
+	dir := t.TempDir()
+	future := fmt.Sprintf(`{"version":%d,"posts":{}}`, CurrentVersion+1)
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(future), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(dir); err == nil {
+		t.Fatal("Load must reject a state file with a newer schema version")
 	}
 }
