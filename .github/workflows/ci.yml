@@ -69,6 +69,25 @@ jobs:
           path: .pages/coverage.json
           retention-days: 1
 
+  test-windows:
+    # Windows is a first-class target with Windows-specific invariants
+    # (NTFS case folding in dirReserver, reserved device names, rename
+    # semantics) — run the actual test suite on it instead of relying on
+    # goreleaser cross-builds. Lean job: vet + race tests; lints and
+    # coverage stay on the Linux job.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+      - run: go vet ./...
+      - name: Run tests with race detector
+        # windows-latest ships MinGW gcc, which -race needs for cgo linking.
+        env:
+          CGO_ENABLED: "1"
+        run: go test ./... -race
+
   publish-coverage:
     needs: test
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
