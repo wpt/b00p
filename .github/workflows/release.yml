@@ -16,7 +16,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.3"
+          go-version: "1.26.4"
       - uses: goreleaser/goreleaser-action@v6
         with:
           # Pin to goreleaser v2.x so artifact naming/format is reproducible
