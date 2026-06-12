@@ -17,6 +17,8 @@ import (
 // the identical request cannot succeed. GetJSON fails fast on it instead of
 // burning the backoff schedule. The message doubles as the user-facing
 // instruction, so refresh errors render exactly as before.
+//
+//lint:ignore ST1005 the message renders mid-sentence after "(status %d)." — the capital starts the user-facing instruction sentence, not an error string.
 var ErrRefreshRejected = errors.New("Get new tokens from browser cookies and update auth.json")
 
 // Tokens holds authentication credentials for the Boosty API.
