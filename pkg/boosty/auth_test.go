@@ -2,8 +2,11 @@ package boosty
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,6 +49,24 @@ func TestLoadTokens(t *testing.T) {
 	}
 	if tok.RefreshToken != "ref456" {
 		t.Errorf("RefreshToken = %q, want 'ref456'", tok.RefreshToken)
+	}
+}
+
+func TestLoadTokens_URLEncodedCookieValue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+
+	content := `{%22accessToken%22:%22abc123%22,%22refreshToken%22:%22ref456%22,%22expiresAt%22:9999999999999}`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tok, err := LoadTokens(path)
+	if err != nil {
+		t.Fatalf("LoadTokens error: %v", err)
+	}
+	if tok.AccessToken != "abc123" || tok.RefreshToken != "ref456" {
+		t.Errorf("decoded tokens = %+v", tok)
 	}
 }
 
@@ -138,6 +159,38 @@ func TestRefreshRequest_EscapesSpecialChars(t *testing.T) {
 					got, tc.deviceID, tc.refreshToken)
 			}
 		})
+	}
+}
+
+func TestRefresh_MissingAccessTokenDoesNotMutate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"refresh_token":"new-refresh","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	tok := &Tokens{
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		DeviceID:     "device",
+		ExpiresAt:    123,
+	}
+
+	err := tok.Refresh(rewriteClient(t, server))
+	if err == nil {
+		t.Fatal("Refresh should reject a 200 response without access_token")
+	}
+	if !strings.Contains(err.Error(), "missing access_token") {
+		t.Fatalf("Refresh error = %q, want missing access_token", err)
+	}
+	if tok.AccessToken != "old-access" {
+		t.Errorf("AccessToken mutated to %q, want old-access", tok.AccessToken)
+	}
+	if tok.RefreshToken != "old-refresh" {
+		t.Errorf("RefreshToken mutated to %q, want old-refresh", tok.RefreshToken)
+	}
+	if tok.ExpiresAt != 123 {
+		t.Errorf("ExpiresAt mutated to %d, want 123", tok.ExpiresAt)
 	}
 }
 

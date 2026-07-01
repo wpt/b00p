@@ -26,6 +26,11 @@ import (
 // whole sync (page error) vs. skip the offending item (parse error).
 var ErrFetchPage = errors.New("page fetch failed")
 
+// ErrTokenSaveFailed marks a refresh that succeeded in memory but could not
+// be persisted to auth.json. Callers fail fast on it instead of continuing
+// with credentials that will disappear on the next process start.
+var ErrTokenSaveFailed = errors.New("token refresh succeeded but saving auth file failed")
+
 const (
 	BaseURL   = "https://api.boosty.to"
 	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
@@ -135,7 +140,7 @@ func (c *Client) GetJSON(url string, out any) error {
 
 		resp, err := c.doRequest("GET", url)
 		if err != nil {
-			if errors.Is(err, ErrRefreshRejected) {
+			if errors.Is(err, ErrRefreshRejected) || errors.Is(err, ErrTokenSaveFailed) {
 				return err
 			}
 			lastErr = err
@@ -161,11 +166,33 @@ func (c *Client) GetJSON(url string, out any) error {
 			return httpErr
 		}
 
-		err = json.NewDecoder(resp.Body).Decode(out)
+		// Read the full body before decoding so the two failure modes get
+		// their own retry verdicts: a mid-body transport failure (conn reset,
+		// stalled stream hitting the client timeout) is as transient as one
+		// before the headers and keeps the retry schedule, while malformed
+		// JSON is deterministic — the same bytes re-download on every attempt
+		// — and fails fast. A single Decoder call conflates the two.
+		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return err
+		if readErr != nil {
+			lastErr = fmt.Errorf("API %s: read body: %w", url, readErr)
+			continue
+		}
+		if err := json.Unmarshal(body, out); err != nil {
+			return fmt.Errorf("API %s: decode response: %w", url, err)
+		}
+		return nil
 	}
 	return fmt.Errorf("after %d retries: %w", len(RetryDelays), lastErr)
+}
+
+// deterministic4xx reports whether an HTTP status is a permanent client-side
+// verdict: any 4xx except 429 (rate limiting, transient by nature). Shared by
+// the token-refresh classification (auth.go) and the media-download
+// classification (download.go) so the transient-vs-deterministic boundary
+// cannot drift between them.
+func deterministic4xx(code int) bool {
+	return code >= 400 && code < 500 && code != http.StatusTooManyRequests
 }
 
 // currentToken returns the access token under lock together with its
@@ -223,11 +250,16 @@ func (c *Client) refreshAndSave(staleToken string) error {
 	if c.Tokens.AccessToken != staleToken {
 		return nil
 	}
+	old := *c.Tokens
 	if err := c.Tokens.Refresh(c.HTTP); err != nil {
+		*c.Tokens = old
 		return err
 	}
 	if c.AuthPath != "" {
-		return c.Tokens.SaveTokens(c.AuthPath)
+		if err := c.Tokens.SaveTokens(c.AuthPath); err != nil {
+			*c.Tokens = old
+			return fmt.Errorf("%w: %w", ErrTokenSaveFailed, err)
+		}
 	}
 	return nil
 }

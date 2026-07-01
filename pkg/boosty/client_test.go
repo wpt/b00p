@@ -62,6 +62,84 @@ func TestGetJSON_Success(t *testing.T) {
 	}
 }
 
+// A 200 whose body dies mid-read (conn reset, stalled stream) is the same
+// transient network flake as a pre-header failure and must keep the retry
+// schedule — a single json.Decoder call would conflate it with malformed
+// JSON and fail the whole run on one dropped connection.
+func TestGetJSON_MidBodyCutRetries(t *testing.T) {
+	saved := RetryDelays
+	RetryDelays = []time.Duration{time.Millisecond}
+	defer func() { RetryDelays = saved }()
+
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&attempts, 1) == 1 {
+			// Promise more bytes than we send, then kill the connection:
+			// the client sees a mid-body unexpected EOF.
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			hj := w.(http.Hijacker)
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens: &Tokens{AccessToken: "t", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		HTTP:   server.Client(),
+		Log:    discardLogger{},
+	}
+
+	var result map[string]string
+	if err := c.GetJSON(server.URL+"/test", &result); err != nil {
+		t.Fatalf("GetJSON should recover from a mid-body cut: %v", err)
+	}
+	if result["status"] != "ok" {
+		t.Errorf("status = %q, want 'ok'", result["status"])
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Errorf("attempts = %d, want 2", got)
+	}
+}
+
+// Malformed JSON in a complete 200 body is deterministic — the same bytes
+// re-download on every attempt — so it fails fast, and the error names the
+// URL (a bare "invalid character ..." would not say which endpoint died).
+func TestGetJSON_MalformedJSONFailsFast(t *testing.T) {
+	saved := RetryDelays
+	RetryDelays = []time.Duration{time.Millisecond}
+	defer func() { RetryDelays = saved }()
+
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		fmt.Fprint(w, "<html>not json</html>")
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens: &Tokens{AccessToken: "t", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		HTTP:   server.Client(),
+		Log:    discardLogger{},
+	}
+
+	var result map[string]string
+	err := c.GetJSON(server.URL+"/test", &result)
+	if err == nil {
+		t.Fatal("GetJSON should fail on malformed JSON")
+	}
+	if !strings.Contains(err.Error(), server.URL+"/test") {
+		t.Errorf("error %q does not name the URL", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Errorf("attempts = %d, want 1 (deterministic verdict, no retries)", got)
+	}
+}
+
 func TestGetJSON_RetryOnNetworkError(t *testing.T) {
 	saved := RetryDelays
 	RetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
@@ -704,6 +782,55 @@ func TestGetJSON_Refresh5xxStaysRetriable(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&refreshCalls); got != 2 {
 		t.Errorf("refresh POSTs = %d, want 2 (first attempt + 1 retry)", got)
+	}
+}
+
+func TestGetJSON_RefreshSaveFailureFailsClosed(t *testing.T) {
+	saved := RetryDelays
+	RetryDelays = []time.Duration{time.Millisecond}
+	defer func() { RetryDelays = saved }()
+
+	var apiCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token/", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "fresh",
+			"refresh_token": "fresh-refresh",
+			"expires_in":    3600,
+		})
+	})
+	mux.HandleFunc("/v1/test", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&apiCalls, 1)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	tok := &Tokens{
+		AccessToken:  "stale",
+		RefreshToken: "old-refresh",
+		ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(),
+	}
+	c := &Client{
+		Tokens:   tok,
+		AuthPath: filepath.Join(t.TempDir(), "missing-parent", "auth.json"),
+		HTTP:     rewriteClient(t, server),
+		Log:      discardLogger{},
+	}
+
+	var out map[string]string
+	err := c.GetJSON(BaseURL+"/v1/test", &out)
+	if err == nil {
+		t.Fatal("GetJSON should fail when refreshed tokens cannot be saved")
+	}
+	if !errors.Is(err, ErrTokenSaveFailed) {
+		t.Fatalf("err = %v, want ErrTokenSaveFailed in chain", err)
+	}
+	if got := atomic.LoadInt32(&apiCalls); got != 0 {
+		t.Errorf("API calls with unpersisted token = %d, want 0", got)
+	}
+	if tok.AccessToken != "stale" || tok.RefreshToken != "old-refresh" {
+		t.Errorf("tokens mutated after save failure: %+v", tok)
 	}
 }
 

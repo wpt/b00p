@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/wpt/b00p/pkg/fileutil"
@@ -47,6 +49,18 @@ func LoadTokens(path string) (*Tokens, error) {
 
 	var tokens Tokens
 	if err := json.Unmarshal(data, &tokens); err != nil {
+		raw := strings.TrimSpace(string(data))
+		// PathUnescape (not QueryUnescape) — both decode %XX identically, but
+		// QueryUnescape also turns a literal '+' into a space, which would
+		// silently corrupt a token containing '+' (common in base64/JWT values).
+		if decoded, decErr := neturl.PathUnescape(raw); decErr == nil && decoded != raw {
+			if retryErr := json.Unmarshal([]byte(decoded), &tokens); retryErr == nil {
+				if tokens.AccessToken == "" {
+					return nil, fmt.Errorf("accessToken is empty in %s", path)
+				}
+				return &tokens, nil
+			}
+		}
 		return nil, fmt.Errorf("parse auth file: %w", err)
 	}
 
@@ -114,7 +128,7 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+		if deterministic4xx(resp.StatusCode) {
 			// Deterministic rejection: the refresh body (device_id +
 			// refresh_token) cannot change between attempts, so a 4xx
 			// verdict is permanent. Wrap the sentinel so callers fail fast.
@@ -127,6 +141,9 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 	var result refreshResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return fmt.Errorf("decode refresh response: %w", err)
+	}
+	if result.AccessToken == "" {
+		return fmt.Errorf("token refresh failed: response missing access_token")
 	}
 
 	t.AccessToken = result.AccessToken
