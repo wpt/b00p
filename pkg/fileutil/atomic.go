@@ -47,3 +47,17 @@ func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
 	}
 	return os.Rename(tmpPath, path)
 }
+
+// RemoveIfExists removes path, treating an already-absent file
+// (os.IsNotExist) as success. Any other error — a permission problem or a
+// Windows sharing-violation from a file held open by an indexer/AV — is
+// returned so the caller decides whether a failed unlink is fatal. Lives
+// here so the cross-platform unlink contract does not drift between the
+// media-download cleanup (pkg/boosty) and the syncer's redownload
+// invalidation (pkg/syncer).
+func RemoveIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
