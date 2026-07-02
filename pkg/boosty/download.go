@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 // RedactURLError strips the URL out of a *url.Error so a surrounding
@@ -79,8 +81,15 @@ func (c *Client) DownloadFile(url, path string) error {
 			c.Log.Printf("  skipping %s (already exists, %s)", path, FormatSize(info.Size()))
 			return nil
 		}
-		// Remove 0-byte files
-		os.Remove(path)
+		// Remove 0-byte files. Best-effort: downloadOnce writes to <path>.tmp
+		// and os.Rename replaces the destination on success (clobbering a stale
+		// 0-byte file on both Linux and Windows), so this upfront unlink is a
+		// cleanliness step, not a correctness prerequisite. A transient failure
+		// here (e.g. a Windows AV/indexer briefly holding the file open) must
+		// not abort a download the rename would otherwise complete.
+		if err := fileutil.RemoveIfExists(path); err != nil {
+			c.Log.Printf("  warning: failed to remove zero-byte file %s: %v", path, err)
+		}
 	}
 
 	var lastErr error
@@ -128,14 +137,23 @@ func (c *Client) downloadOnce(url, path string) error {
 	// The sidecar <tmp>.url records the URL the tmp was opened against.
 	var resumeFrom int64
 	if info, err := os.Stat(tmpPath); err == nil && info.Mode().IsRegular() {
-		sidecar, _ := os.ReadFile(sidecarPath)
-		if string(sidecar) == url {
+		sidecar, readErr := os.ReadFile(sidecarPath)
+		if readErr == nil && string(sidecar) == url {
 			resumeFrom = info.Size()
 		} else {
+			if readErr != nil && !os.IsNotExist(readErr) {
+				c.Log.Printf("  warning: failed to read resume sidecar %s: %v", sidecarPath, readErr)
+			}
 			// URL changed (signed URL refreshed, or no sidecar from a pre-
 			// sidecar run): drop the stale partial so we restart cleanly.
-			os.Remove(tmpPath)
-			os.Remove(sidecarPath)
+			// Best-effort: the truncating os.Create + sidecar rewrite below
+			// restart from byte 0 regardless, so a failed unlink (e.g. a
+			// writable file in a non-writable dir, where unlink needs dir
+			// write but O_TRUNC needs only file write) must not abort an
+			// otherwise-fine download.
+			if err := removePair(tmpPath, sidecarPath); err != nil {
+				c.Log.Printf("  warning: failed to reset stale tmp for %s: %v", filename, err)
+			}
 		}
 	}
 
@@ -193,8 +211,15 @@ func (c *Client) downloadOnce(url, path string) error {
 				c.Log.Printf("  warning: server returned 206 with unexpected Content-Range %q (wanted %s); restarting from 0", cr, expectedPrefix)
 				// Drop the partial — we can't trust its alignment any more.
 				resp.Body.Close()
-				os.Remove(tmpPath)
-				os.Remove(sidecarPath)
+				if err := removePair(tmpPath, sidecarPath); err != nil {
+					// Reset failed: the stale tmp + matching sidecar survive, so
+					// a retry would resume the same offset and re-hit the same
+					// 206 mismatch forever. Fail non-retriable instead of
+					// burning the whole backoff schedule (same rationale as the
+					// close-error branch below).
+					return fmt.Errorf("download %s: Content-Range %q does not start at %d; reset failed: %w",
+						filename, cr, resumeFrom, errors.Join(err, errNonRetriable))
+				}
 				return fmt.Errorf("download %s: Content-Range %q does not start at %d", filename, cr, resumeFrom)
 			}
 		}
@@ -202,8 +227,14 @@ func (c *Client) downloadOnce(url, path string) error {
 		// Our tmp file is larger than the server-side resource (signed URL
 		// pointing at a re-encoded variant, or server-side rotation). Drop
 		// the tmp and its sidecar so the next attempt starts fresh.
-		os.Remove(tmpPath)
-		os.Remove(sidecarPath)
+		if err := removePair(tmpPath, sidecarPath); err != nil {
+			// Reset failed: the oversized tmp + matching sidecar survive, so a
+			// retry resumes the same offset and re-hits 416 every time. Fail
+			// non-retriable rather than looping the backoff schedule (same
+			// rationale as the close-error branch below).
+			return fmt.Errorf("download %s: range not satisfiable; tmp reset failed: %w",
+				filename, errors.Join(err, errNonRetriable))
+		}
 		return fmt.Errorf("download %s: range not satisfiable; tmp reset", filename)
 	default:
 		// Include a body snippet for diagnosis — bare "status 403" hides the
@@ -222,7 +253,7 @@ func (c *Client) downloadOnce(url, path string) error {
 		// 4xx other than 429 is deterministic — same URL, same verdict — so
 		// mark it non-retriable and let DownloadFile fail fast. 429 and 5xx
 		// are transient by nature and keep the retry schedule.
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+		if deterministic4xx(resp.StatusCode) {
 			return fmt.Errorf("%w (%w)", statusErr, errNonRetriable)
 		}
 		return statusErr
@@ -316,22 +347,42 @@ func (c *Client) downloadOnce(url, path string) error {
 		// sidecar goes with it — tmp and sidecar are always dropped (or
 		// kept) as a pair so the pairing never has to be reasoned about.
 		if closeErr != nil {
-			os.Remove(tmpPath)
-			os.Remove(sidecarPath)
+			if err := removePair(tmpPath, sidecarPath); err != nil {
+				// The durability-suspect tmp (and possibly its matching
+				// sidecar) survive on disk. A retry would stat the tmp, find a
+				// matching sidecar, and Range-resume from those unflushed bytes
+				// — the exact "resume garbage" this branch exists to prevent.
+				// Mark non-retriable so DownloadFile stops instead of appending
+				// onto the suspect tmp. (When cleanup SUCCEEDS the tmp is gone,
+				// so the next attempt restarts from byte 0 — safe to retry.)
+				return fmt.Errorf("write %s: %w", path,
+					errors.Join(copyErr, closeErr, fmt.Errorf("cleanup tmp: %w", err), errNonRetriable))
+			}
 		}
 		return fmt.Errorf("write %s: %w", path, errors.Join(copyErr, closeErr))
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		os.Remove(sidecarPath)
+		if cleanupErr := removePair(tmpPath, sidecarPath); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("cleanup tmp: %w", cleanupErr))
+		}
 		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
 	}
 	// Sidecar's only purpose is resume safety — once the final file is in
 	// place there is nothing to verify on the next run.
-	os.Remove(sidecarPath)
+	if err := fileutil.RemoveIfExists(sidecarPath); err != nil {
+		c.Log.Printf("  warning: failed to remove resume sidecar %s: %v", sidecarPath, err)
+	}
 
 	c.Log.Printf("  downloaded %s (%s)", filename, FormatSize(pw.written))
 	return nil
+}
+
+// removePair drops a tmp file and its .url sidecar together — they are always
+// created and removed as a pair so the resume logic never has to reason about a
+// tmp with no sidecar (or vice versa). errors.Join attempts both regardless of
+// which fails.
+func removePair(a, b string) error {
+	return errors.Join(fileutil.RemoveIfExists(a), fileutil.RemoveIfExists(b))
 }
 
 type progressWriter struct {
