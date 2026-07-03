@@ -7,6 +7,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/wpt/b00p/pkg/boosty"
 )
@@ -30,10 +31,10 @@ type ParsedContent struct {
 	// grab the missing video via yt-dlp on the HLS source or report it.
 	SkippedVideos int
 	// UnknownTypes lists block types ParseBlocks does not handle (unique,
-	// in first-seen order). Boosty has content kinds b00p never met yet —
-	// audio posts, file attachments — and silently dropping them would
-	// leave an invisible hole in the archive. Callers should log the list
-	// so the user learns support is missing the moment it matters.
+	// in first-seen order). Boosty keeps shipping new content kinds, and
+	// silently dropping one would leave an invisible hole in the archive.
+	// Callers should log the list so the user learns support is missing
+	// the moment it matters.
 	UnknownTypes []string
 }
 
@@ -54,41 +55,66 @@ var mp4QualityRank = map[string]int{
 
 // ExtractText pulls the human-readable string out of Boosty's Draft.js content format.
 // Content comes as a JSON array: ["text", "unstyled", [...styles]]
-// We only need the first element (the actual text).
+// We only need the first element (the actual text). Run-boundary whitespace
+// inside it is preserved: one visual paragraph arrives as several runs
+// (text("see "), link(...), text(" for details")) and the spacing that joins
+// them lives at the run edges — trimming here would glue "see" to the link.
+// ParseBlocks trims the assembled paragraph instead.
 func ExtractText(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return ""
 	}
-	if raw[0] == '[' {
+	if trimmed[0] == '[' {
 		var arr []json.RawMessage
-		if err := json.Unmarshal([]byte(raw), &arr); err == nil && len(arr) > 0 {
+		if err := json.Unmarshal([]byte(trimmed), &arr); err == nil && len(arr) > 0 {
 			var text string
 			if err := json.Unmarshal(arr[0], &text); err == nil {
-				return strings.TrimSpace(text)
+				return text
 			}
 		}
 	}
-	return raw
+	return trimmed
 }
 
 // ParseBlocks extracts text and media from a post's content blocks.
+//
+// Text flow: the API delivers one visual paragraph as several consecutive
+// runs — e.g. text("see "), link("this post"), text(" for details") — closed
+// by a text block whose modificator is "BLOCK_END". Runs accumulate into one
+// TextParts entry and flush at each BLOCK_END; media and unknown blocks also
+// flush, so a paragraph can never span across an image. Joining is verbatim
+// (the author's spacing lives at the run edges), with a single trim of the
+// assembled paragraph.
 func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 	var result ParsedContent
 	var imgIdx, vidIdx int
+	var para []string
+
+	flushPara := func() {
+		if len(para) == 0 {
+			return
+		}
+		joined := strings.TrimSpace(strings.Join(para, ""))
+		para = para[:0]
+		if joined != "" {
+			result.TextParts = append(result.TextParts, joined)
+		}
+	}
 
 	for _, block := range blocks {
 		switch block.Type {
 		case "text":
 			if block.Modificator == "BLOCK_END" {
+				flushPara()
 				continue
 			}
-			text := ExtractText(block.Content)
-			if text != "" {
-				result.TextParts = append(result.TextParts, text)
+			if text := ExtractText(block.Content); text != "" {
+				para = append(para, text)
 			}
 
 		case "image":
+			flushPara()
 			imgIdx++
 			imgURL := block.URL
 			if imgURL == "" {
@@ -103,6 +129,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			})
 
 		case "ok_video":
+			flushPara()
 			vidIdx++
 			vidURL := BestMP4URL(block.PlayerURLs)
 			if vidURL == "" {
@@ -117,6 +144,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			})
 
 		case "video":
+			flushPara()
 			vidIdx++
 			if block.URL != "" {
 				result.Media = append(result.Media, MediaItem{
@@ -127,38 +155,54 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			}
 
 		case "link":
-			if block.URL != "" {
-				text := ExtractText(block.Content)
-				if text == "" {
-					text = block.URL
-				}
-				result.TextParts = append(result.TextParts, fmt.Sprintf("[%s](%s)", text, block.URL))
+			text := ExtractText(block.Content)
+			if strings.TrimSpace(text) == "" {
+				text = block.URL
 			}
+			if text == "" {
+				// Neither label nor URL — nothing to archive.
+				continue
+			}
+			// formatMarkdownLink degrades to the bare escaped label when the
+			// URL is empty (editor artifact, dead link) — the author's text
+			// must not vanish from the archive with it.
+			para = append(para, formatMarkdownLink(text, block.URL))
 
 		default:
+			flushPara()
 			if !slices.Contains(result.UnknownTypes, block.Type) {
 				result.UnknownTypes = append(result.UnknownTypes, block.Type)
 			}
 		}
 	}
+	flushPara()
 
 	return result
 }
 
 // imageExt picks an extension for a downloaded image. Boosty image URLs are
-// signed, so naive path.Ext("...png?sig=...") returns ".png?sig=..." (too long
-// to be a real extension) and the previous code fell back to ".jpg" for every
-// signed URL. Strip query/fragment first, then fall back to ".jpg" only on
-// genuinely missing or implausible extensions.
+// signed, so naive path.Ext("...png?sig=...") returns ".png?sig=..." and the
+// previous code fell back to ".jpg" for every signed URL. Strip query/fragment
+// first, then accept only the formats Boosty's CDN actually serves; anything
+// else (missing, query-polluted, or an FS-unsafe extension) falls back to ".jpg".
 func imageExt(s string) string {
-	if u, err := url.Parse(s); err == nil && u.Path != "" {
-		s = u.Path
-	}
-	ext := path.Ext(s)
-	if ext == "" || len(ext) > 5 {
+	switch ext := urlPathExt(s); ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif":
+		return ext
+	default:
 		return ".jpg"
 	}
-	return strings.ToLower(ext)
+}
+
+// urlPathExt returns the lowercased file extension of a URL's path, stripping
+// any query/fragment first. Boosty signs its media URLs, so a naive
+// path.Ext("...mp4?sig=...") would return ".mp4?sig=..."; parsing to the path
+// avoids that. Returns "" when the path has no extension.
+func urlPathExt(raw string) string {
+	if u, err := url.Parse(raw); err == nil && u.Path != "" {
+		raw = u.Path
+	}
+	return strings.ToLower(path.Ext(raw))
 }
 
 // BestMP4URL selects the highest quality direct MP4 URL from player URLs.
@@ -166,6 +210,7 @@ func imageExt(s string) string {
 // when nothing better is available.
 func BestMP4URL(urls []boosty.PlayerURL) string {
 	var best string
+	var fallback string
 	bestRank := -1
 
 	for _, u := range urls {
@@ -176,7 +221,87 @@ func BestMP4URL(urls []boosty.PlayerURL) string {
 		if ok && rank > bestRank {
 			best = u.URL
 			bestRank = rank
+			continue
+		}
+		if !ok && fallback == "" && isDirectMP4URL(u.URL) {
+			fallback = u.URL
 		}
 	}
+	if best == "" {
+		return fallback
+	}
 	return best
+}
+
+func isDirectMP4URL(raw string) bool {
+	return urlPathExt(raw) == ".mp4"
+}
+
+// formatMarkdownLink renders an author-supplied link (post link blocks and the
+// external-video reference) as markdown. The label is escaped and its
+// line-breaking whitespace collapsed (EscapeMarkdownLabel) so a stray ']' / '\'
+// or an embedded newline cannot terminate the link early; the destination is
+// wrapped in <...> with angle brackets and control bytes percent-escaped so
+// spaces/parens (legal inside <...>) stay verbatim while a '<'/'>' or a
+// paste-artifact control char cannot break the markdown. No scheme filtering:
+// this is the user's own local archive (no XSS surface), so a mailto:/tg:/ftp:
+// link keeps its URL instead of being silently dropped.
+func formatMarkdownLink(text, rawURL string) string {
+	dest := strings.TrimSpace(rawURL)
+	if dest == "" {
+		// No destination at all — emit the escaped label alone rather than a
+		// broken "[label](<>)".
+		return EscapeMarkdownLabel(text)
+	}
+	return fmt.Sprintf("[%s](<%s>)", EscapeMarkdownLabel(text), escapeMarkdownDestination(dest))
+}
+
+// escapeMarkdownDestination neutralises the characters that can break a <...>
+// markdown destination: the angle brackets, a backslash (CommonMark treats it
+// as an escape inside <...>, so a trailing '\' would escape the closing '>' and
+// leave the link unterminated), and any control byte (a stray \n/\r/\t from a
+// paste artifact would otherwise split the link or end the line). Each is
+// percent-escaped over its UTF-8 bytes so the URL is preserved rather than
+// dropped.
+func escapeMarkdownDestination(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '<':
+			b.WriteString("%3C")
+		case r == '>':
+			b.WriteString("%3E")
+		case r == '\\':
+			b.WriteString("%5C")
+		case unicode.IsControl(r):
+			for _, by := range []byte(string(r)) {
+				fmt.Fprintf(&b, "%%%02X", by)
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+var markdownLabelReplacer = strings.NewReplacer(`\`, `\\`, "[", `\[`, "]", `\]`)
+
+// EscapeMarkdownLabel makes author-supplied text safe as the label in a
+// [label](dest) markdown link: line-breaking whitespace is collapsed to single
+// spaces (a raw newline would otherwise split the link across lines) and the
+// metacharacters that can terminate the label early (`\`, `[`, `]`) are
+// backslash-escaped. Shared by the parser's link / external-video rendering
+// and the syncer's blog index so the rule lives in one place.
+func EscapeMarkdownLabel(s string) string {
+	return markdownLabelReplacer.Replace(collapseWhitespace(s))
+}
+
+// collapseWhitespace flattens every whitespace run — including \r\n — to a
+// single space and trims the ends (strings.Fields drops leading/trailing
+// whitespace; Join re-inserts one space only between fields). One home for
+// the rule shared by markdown labels, the H1 title line, and directory-name
+// sanitizing so the collapse semantics cannot drift between them.
+func collapseWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

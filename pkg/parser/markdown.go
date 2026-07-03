@@ -46,8 +46,9 @@ func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 	}
 	b.WriteString("---\n\n")
 
-	// Title
-	b.WriteString(fmt.Sprintf("# %s\n\n", post.Title))
+	// Title — collapsed onto a single line so a multi-line API title cannot
+	// split the H1 across lines.
+	b.WriteString(fmt.Sprintf("# %s\n\n", collapseWhitespace(post.Title)))
 
 	// Text content
 	for _, text := range parsed.TextParts {
@@ -59,11 +60,14 @@ func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 	for _, m := range parsed.Media {
 		switch m.Type {
 		case "image":
+			// m.Filename is parser-generated ("image_001.jpg") — no markdown
+			// metacharacters possible, so no escaping is needed.
 			b.WriteString(fmt.Sprintf("![%s](%s)\n\n", m.Filename, m.Filename))
 		case "video":
 			b.WriteString(fmt.Sprintf("[Video: %s](%s)\n\n", m.Filename, m.Filename))
 		case "external_video":
-			b.WriteString(fmt.Sprintf("[External Video](%s)\n\n", m.URL))
+			b.WriteString(formatMarkdownLink("External Video", m.URL))
+			b.WriteString("\n\n")
 		}
 	}
 

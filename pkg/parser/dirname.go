@@ -51,6 +51,14 @@ func FormatDirName(format string, title string, publishTime int64, postID string
 		}
 	})
 
+	// The format string itself is user-controlled, and {date:FORMAT} copies
+	// unknown runes literally. Sanitize the whole formatted result so
+	// separators or device characters introduced outside {title} cannot
+	// create nested paths or Windows-invalid names. Only the char cleanup is
+	// applied here — the length cap stays scoped to {title} (SanitizeTitle) so
+	// a {date} prefix does not eat into the title's budget.
+	result = sanitizeNameChars(result)
+
 	// Trim trailing dots and spaces (Windows FS limitation) and leading dots
 	// or spaces (otherwise "." / ".." / ".hidden" sanitize-survives and can
 	// collide with the parent dir entry or be hidden on Unix-style listings).
@@ -100,23 +108,10 @@ func FormatDate(t time.Time, format string) string {
 	return b.String()
 }
 
-// SanitizeTitle cleans a post title for use as a directory name.
+// SanitizeTitle cleans a post title for use as a directory name and caps it at
+// 80 runes so a single placeholder cannot dominate the path.
 func SanitizeTitle(title string) string {
-	s := unsafeCharsRe.ReplaceAllString(title, "")
-	// Strip non-space control bytes (C0 0x00-0x1F, DEL 0x7F, C1 0x80-0x9F).
-	// Windows os.MkdirAll rejects any path containing them, so a stray
-	// control char in a Boosty title (paste artifact, BEL, NUL, etc.) would
-	// otherwise make that post permanently undownloadable and re-error on
-	// every --sync. Space-like controls (\t\n\v\f\r) are left for the
-	// strings.Fields call below to collapse into a single separating space.
-	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) && !unicode.IsSpace(r) {
-			return -1
-		}
-		return r
-	}, s)
-	s = strings.Join(strings.Fields(s), " ")
-	s = strings.TrimSpace(s)
+	s := sanitizeNameChars(title)
 	if len([]rune(s)) > 80 {
 		s = string([]rune(s)[:80])
 		s = strings.TrimRightFunc(s, func(r rune) bool {
@@ -124,4 +119,27 @@ func SanitizeTitle(title string) string {
 		})
 	}
 	return s
+}
+
+// sanitizeNameChars strips FS-unsafe and control characters and collapses
+// whitespace, with NO length cap. SanitizeTitle layers the 80-rune cap on top
+// for the {title} placeholder; FormatDirName applies this to the whole
+// formatted result so separators from a {date:FORMAT} literal cannot create
+// nested paths, while leaving the length budget to {title}.
+func sanitizeNameChars(s string) string {
+	s = unsafeCharsRe.ReplaceAllString(s, "")
+	// Strip non-space control bytes (C0 0x00-0x1F, DEL 0x7F, C1 0x80-0x9F).
+	// Windows os.MkdirAll rejects any path containing them, so a stray
+	// control char in a Boosty title (paste artifact, BEL, NUL, etc.) would
+	// otherwise make that post permanently undownloadable and re-error on
+	// every --sync. Space-like controls (\t\n\v\f\r) are left for
+	// collapseWhitespace to fold into a single separating space; it also
+	// trims the ends.
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && !unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
+	return collapseWhitespace(s)
 }

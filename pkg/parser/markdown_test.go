@@ -55,8 +55,8 @@ func TestGenerateMarkdown_FrontmatterEscaping(t *testing.T) {
 	if !strings.Contains(md, "\n---\n\n") {
 		t.Error("missing trailing frontmatter delimiter")
 	}
-	// The user-visible H1 still uses the raw title — markdown rendering
-	// handles in-body content so escaping it is not required.
+	// The H1 uses the title with whitespace/newlines collapsed
+	// (collapseWhitespace) but is otherwise unescaped — a ':' renders fine.
 	if !strings.Contains(md, "# Title with: colon") {
 		t.Error("missing H1 heading line")
 	}
@@ -94,5 +94,34 @@ func TestGenerateMarkdown_PriceAndTier(t *testing.T) {
 	}
 	if !strings.Contains(md, `tier: "tier_2"`) {
 		t.Errorf("missing tier: tier_2\n%s", md)
+	}
+}
+
+func TestGenerateMarkdown_BodyLinks(t *testing.T) {
+	post := &boosty.Post{
+		ID:          "abc",
+		Title:       "Title\nInjected",
+		PublishTime: 1700000000,
+		User:        boosty.PostUser{Name: "Author", BlogURL: "blog"},
+	}
+	parsed := ParsedContent{
+		Media: []MediaItem{
+			{Type: "image", Filename: "image_001.jpg"},
+			{Type: "video", Filename: "video_001.mp4"},
+			{Type: "external_video", URL: "https://example.com/watch/(id)"},
+		},
+	}
+
+	md := GenerateMarkdown(post, parsed)
+	want := []string{
+		"# Title Injected\n\n",            // newline in the API title collapsed to one line
+		"![image_001.jpg](image_001.jpg)", // generated filename, plain form
+		"[Video: video_001.mp4](video_001.mp4)",
+		`[External Video](<https://example.com/watch/(id)>)`, // untrusted URL wrapped in <...>
+	}
+	for _, s := range want {
+		if !strings.Contains(md, s) {
+			t.Errorf("missing %q in markdown\n%s", s, md)
+		}
 	}
 }

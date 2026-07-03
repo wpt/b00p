@@ -115,6 +115,16 @@ func TestFormatDirName_TrailingDots(t *testing.T) {
 	}
 }
 
+func TestFormatDirName_SanitizesFullFormat(t *testing.T) {
+	got := FormatDirName(`../{date:m/d}_{title}:{id}`, "Title", 1700000000, "post123")
+	if strings.ContainsAny(got, `\/:*?"<>|`) {
+		t.Fatalf("FormatDirName returned unsafe name %q", got)
+	}
+	if strings.HasPrefix(got, ".") {
+		t.Fatalf("FormatDirName returned leading-dot name %q", got)
+	}
+}
+
 // Leading dots must be stripped — otherwise a title like ".." sanitize-survives
 // (no unsafe chars, not empty) and collides with the parent directory entry.
 func TestFormatDirName_LeadingDots(t *testing.T) {

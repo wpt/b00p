@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 
@@ -18,7 +19,10 @@ func TestExtractText_DraftJSFormat(t *testing.T) {
 		{"empty array", `[]`, "[]"},
 		{"empty string", "", ""},
 		{"plain text fallback", "just plain text", "just plain text"},
-		{"whitespace trimmed", `["  spaces  ","unstyled",[]]`, "spaces"},
+		// Run-boundary whitespace is preserved — one paragraph arrives as
+		// several runs and the joining spaces live at the run edges;
+		// ParseBlocks trims the assembled paragraph instead.
+		{"run whitespace preserved", `["  spaces  ","unstyled",[]]`, "  spaces  "},
 		{"cyrillic", `["Тест или не тест вот в чём вопрос","unstyled",[]]`, "Тест или не тест вот в чём вопрос"},
 		{"escaped quotes", `["Тир \"Тестовый для теста\"","unstyled",[]]`, `Тир "Тестовый для теста"`},
 		{"newlines preserved", `["line1\nline2","unstyled",[]]`, "line1\nline2"},
@@ -115,6 +119,17 @@ func TestBestMP4URL_UnknownTypes(t *testing.T) {
 	}
 }
 
+func TestBestMP4URL_FallsBackToUnknownDirectMP4(t *testing.T) {
+	urls := []boosty.PlayerURL{
+		{Type: "hls", URL: "https://example.com/video.m3u8"},
+		{Type: "source", URL: "https://cdn.example.com/video.mp4?sig=1"},
+	}
+	got := BestMP4URL(urls)
+	if got != "https://cdn.example.com/video.mp4?sig=1" {
+		t.Errorf("BestMP4URL = %q, want unknown direct mp4 fallback", got)
+	}
+}
+
 func TestParseBlocks_TextAndMedia(t *testing.T) {
 	blocks := []boosty.ContentBlock{
 		{Type: "text", Content: `["Hello","unstyled",[]]`},
@@ -135,7 +150,7 @@ func TestParseBlocks_TextAndMedia(t *testing.T) {
 	if result.TextParts[0] != "Hello" {
 		t.Errorf("TextParts[0] = %q, want 'Hello'", result.TextParts[0])
 	}
-	if result.TextParts[1] != "[Click here](https://example.com)" {
+	if result.TextParts[1] != "[Click here](<https://example.com>)" {
 		t.Errorf("TextParts[1] = %q, want link markdown", result.TextParts[1])
 	}
 
@@ -153,14 +168,15 @@ func TestParseBlocks_TextAndMedia(t *testing.T) {
 	}
 }
 
-func TestParseBlocks_SkipsBlockEnd(t *testing.T) {
+func TestParseBlocks_BlockEndTerminatesParagraph(t *testing.T) {
 	blocks := []boosty.ContentBlock{
 		{Type: "text", Content: `["Real text","unstyled",[]]`},
 		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "text", Modificator: "BLOCK_END"}, // empty paragraph — dropped
 	}
 	result := ParseBlocks(blocks)
 	if len(result.TextParts) != 1 {
-		t.Errorf("TextParts len = %d, want 1 (BLOCK_END should be skipped)", len(result.TextParts))
+		t.Errorf("TextParts len = %d, want 1 (BLOCK_END terminates, empty paragraphs dropped)", len(result.TextParts))
 	}
 }
 
@@ -240,21 +256,151 @@ func TestParseBlocks_ImageExtensionWithQueryString(t *testing.T) {
 	}
 }
 
+func TestParseBlocks_ImageExtensionWhitelist(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "image", URL: "https://images.boosty.to/image/abc."},
+		{Type: "image", URL: "https://images.boosty.to/image/abc.jp:g"},
+	}
+	result := ParseBlocks(blocks)
+	if len(result.Media) != len(blocks) {
+		t.Fatalf("Media len = %d, want %d", len(result.Media), len(blocks))
+	}
+	for i, m := range result.Media {
+		if m.Filename != fmt.Sprintf("image_%03d.jpg", i+1) {
+			t.Errorf("Media[%d].Filename = %q, want .jpg fallback", i, m.Filename)
+		}
+	}
+}
+
+func TestParseBlocks_LinkMarkdownSafety(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "link", URL: "https://example.com/a path/(x)", Content: `["[Click] \\ here","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "link", URL: "javascript:alert(1)", Content: `["bad","unstyled",[]]`},
+	}
+	result := ParseBlocks(blocks)
+	// Label brackets/backslashes are escaped so they can't break the link; the
+	// destination is wrapped in <...>. Spaces/parens are legal inside angle
+	// brackets and kept verbatim.
+	if got, want := result.TextParts[0], `[\[Click\] \\ here](<https://example.com/a path/(x)>)`; got != want {
+		t.Errorf("link = %q, want %q", got, want)
+	}
+	// No scheme filtering — a non-http(s) URL keeps its link (local archive,
+	// no XSS surface); it is not dropped to a bare label.
+	if got, want := result.TextParts[1], `[bad](<javascript:alert(1)>)`; got != want {
+		t.Errorf("non-http link = %q, want %q", got, want)
+	}
+}
+
+func TestParseBlocks_LinkLabelNewlineCollapsed(t *testing.T) {
+	// A newline inside the link label would split the markdown link across two
+	// lines; EscapeMarkdownLabel collapses it to a single space so the link
+	// stays intact on one line.
+	blocks := []boosty.ContentBlock{
+		{Type: "link", URL: "https://example.com", Content: `["Click\nhere","unstyled",[]]`},
+	}
+	result := ParseBlocks(blocks)
+	if got, want := result.TextParts[0], `[Click here](<https://example.com>)`; got != want {
+		t.Errorf("link = %q, want %q", got, want)
+	}
+}
+
+func TestParseBlocks_LinkURLControlCharPreserved(t *testing.T) {
+	// A control byte in the URL must not drop the destination — it is
+	// percent-escaped over its UTF-8 bytes so the link (and the archived URL)
+	// survives instead of degrading to a bare label.
+	blocks := []boosty.ContentBlock{
+		{Type: "link", URL: "https://example.com/a\tb", Content: `["x","unstyled",[]]`},
+	}
+	result := ParseBlocks(blocks)
+	if got, want := result.TextParts[0], `[x](<https://example.com/a%09b>)`; got != want {
+		t.Errorf("link = %q, want %q", got, want)
+	}
+}
+
+func TestParseBlocks_LinkURLBackslashEscaped(t *testing.T) {
+	// A trailing backslash in the destination would otherwise escape the
+	// closing '>' inside <...> (CommonMark) and leave the link unterminated; it
+	// is percent-escaped to %5C so the link stays closed.
+	blocks := []boosty.ContentBlock{
+		{Type: "link", URL: `https://example.com/path\`, Content: `["x","unstyled",[]]`},
+	}
+	result := ParseBlocks(blocks)
+	if got, want := result.TextParts[0], `[x](<https://example.com/path%5C>)`; got != want {
+		t.Errorf("link = %q, want %q", got, want)
+	}
+}
+
 // Unknown block types are collected (unique, first-seen order) instead of
 // being silently dropped — the syncer logs them so the user learns the
-// moment a blog uses a content kind b00p does not support yet (audio
-// attachments, files, whatever Boosty ships next).
+// moment a blog uses a content kind b00p does not support yet (whatever
+// Boosty ships next).
 func TestParseBlocks_CollectsUnknownTypes(t *testing.T) {
 	blocks := []boosty.ContentBlock{
 		{Type: "text", Content: `["hi","unstyled",[]]`},
-		{Type: "audio_file", URL: "https://example.com/a.mp3"},
-		{Type: "audio_file", URL: "https://example.com/b.mp3"},
-		{Type: "file", URL: "https://example.com/doc.pdf"},
+		{Type: "poll", ID: "p1"},
+		{Type: "poll", ID: "p2"},
+		{Type: "some_future_kind", URL: "https://example.com/x"},
 	}
 	got := ParseBlocks(blocks)
-	want := []string{"audio_file", "file"}
+	want := []string{"poll", "some_future_kind"}
 	if !slices.Equal(got.UnknownTypes, want) {
 		t.Errorf("UnknownTypes = %v, want %v (unique, first-seen order)", got.UnknownTypes, want)
+	}
+}
+
+// One visual paragraph arrives as several runs closed by a BLOCK_END marker.
+// Fixture mirrors a real payload: text("Утиный бусти: ") + link + BLOCK_END is
+// ONE line the author wrote — it must land in one TextParts entry with the
+// separating space preserved, not split into two paragraphs. (Verified
+// against a live post.json; the pre-fix parser emitted three paragraphs for
+// a mid-sentence link and ate the run-boundary spacing.)
+func TestParseBlocks_AssemblesParagraphs(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "text", Content: `["see ","unstyled",[]]`},
+		{Type: "link", URL: "https://example.com", Content: `["this post","unstyled",[]]`},
+		{Type: "text", Content: `[" for details","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "text", Content: `["next paragraph","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+	}
+	result := ParseBlocks(blocks)
+	want := []string{
+		`see [this post](<https://example.com>) for details`,
+		`next paragraph`,
+	}
+	if !slices.Equal(result.TextParts, want) {
+		t.Errorf("TextParts = %q, want %q", result.TextParts, want)
+	}
+}
+
+// A trailing paragraph without a closing BLOCK_END must still flush, and a
+// media block acts as a paragraph boundary so text can never merge across it.
+func TestParseBlocks_FlushesOnMediaAndAtEnd(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "text", Content: `["before","unstyled",[]]`},
+		{Type: "image", URL: "https://images.boosty.to/image/x.jpg"},
+		{Type: "text", Content: `["after","unstyled",[]]`},
+	}
+	result := ParseBlocks(blocks)
+	want := []string{"before", "after"}
+	if !slices.Equal(result.TextParts, want) {
+		t.Errorf("TextParts = %q, want %q", result.TextParts, want)
+	}
+}
+
+// A link block with an empty URL (editor artifact, dead link) must keep the
+// author's label text in the archive instead of silently dropping the block.
+func TestParseBlocks_EmptyURLLinkKeepsLabel(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "link", URL: "", Content: `["important text","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "link", URL: "", Content: `["","unstyled",[]]`}, // nothing to archive
+	}
+	result := ParseBlocks(blocks)
+	want := []string{"important text"}
+	if !slices.Equal(result.TextParts, want) {
+		t.Errorf("TextParts = %q, want %q", result.TextParts, want)
 	}
 }
 
