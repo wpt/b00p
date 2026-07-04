@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
 
@@ -39,6 +40,9 @@ func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) e
 	if !hasExternal {
 		return nil
 	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
 
 	ytdlp, err := exec.LookPath("yt-dlp")
 	if err != nil {
@@ -58,13 +62,20 @@ func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) e
 		// flag (e.g. `--exec=...`), which would otherwise let a hostile post
 		// smuggle arbitrary args through the embed.
 		ctx, cancel := context.WithTimeout(context.Background(), ytdlpTimeout)
-		cmd := exec.CommandContext(ctx, ytdlp, "-o", m.Filename+".%(ext)s", "--", m.URL)
+		cmd := exec.CommandContext(ctx, ytdlp, "--no-playlist", "-o", m.Filename+".%(ext)s", "--", m.URL)
 		cmd.Dir = dir
 		// WaitDelay closes the inherited stdout/stderr pipes after the
 		// context fires so a grandchild that outlives yt-dlp (most often
 		// ffmpeg invoked for muxing) cannot keep cmd.Wait blocked forever.
 		// Without this the 20m timeout would not fire on the very scenario
 		// it was added for — ffmpeg muxing hangs on a remuxed YouTube DL.
+		//
+		// Accepted cost: only yt-dlp itself is killed on timeout — the
+		// grandchild is not (that needs process groups on Linux and Job
+		// objects on Windows; not worth the platform plumbing for a
+		// best-effort feature). On Linux the orphan usually dies on its next
+		// pipe write (SIGPIPE); on Windows it can run on and leave .part
+		// files in the post directory until it finishes or errors out.
 		cmd.WaitDelay = 5 * time.Second
 		output, err := cmd.CombinedOutput()
 		cancel()

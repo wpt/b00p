@@ -270,6 +270,26 @@ func TestDownloadExternal_MissingYTDLP(t *testing.T) {
 	}
 }
 
+func TestDownloadExternal_CreatesDir(t *testing.T) {
+	fakeDir, ytdlp := installFakeYTDLP(t)
+	t.Setenv("PATH", fakeDir)
+	if filepath.Ext(ytdlp) == ".bat" {
+		t.Setenv("PATHEXT", ".BAT")
+	}
+
+	log := &recordingLogger{}
+	dir := filepath.Join(t.TempDir(), "missing", "nested")
+	err := DownloadExternal(log, []parser.MediaItem{
+		{Type: "external_video", URL: "https://youtu.be/abc", Filename: "ext"},
+	}, dir)
+	if err == nil {
+		t.Fatal("fake yt-dlp should still fail after directory creation")
+	}
+	if _, statErr := os.Stat(dir); statErr != nil {
+		t.Fatalf("DownloadExternal did not create dir: %v", statErr)
+	}
+}
+
 // TestDownloadExternal_HostileURLNotInterpretedAsFlag pins the `--` stop-parsing
 // contract: a post that embeds a URL starting with `-` (or `--exec=...`-style
 // payload) must not be smuggled to yt-dlp as a flag. We replace yt-dlp with a
@@ -310,6 +330,9 @@ func TestDownloadExternal_HostileURLNotInterpretedAsFlag(t *testing.T) {
 	// Sanity: the `-o` template must still be there.
 	if !strings.Contains(out, "hostile.%(ext)s") {
 		t.Errorf("output template missing: %q", out)
+	}
+	if !strings.Contains(out, "--no-playlist") {
+		t.Errorf("argv missing --no-playlist: %q", out)
 	}
 }
 
