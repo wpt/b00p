@@ -15,6 +15,7 @@ var statBlog string
 var statCmd = &cobra.Command{
 	Use:   "stat",
 	Short: "Show blog statistics and current user info",
+	Args:  cobra.NoArgs,
 	RunE:  runStat,
 }
 
@@ -38,7 +39,8 @@ func runStat(cmd *cobra.Command, args []string) error {
 	fmt.Println("=== Who Is Me ===")
 	var subs boosty.SubscriptionsResponse
 	if err := c.GetJSON(boosty.UserSubscriptionsURL(), &subs); err != nil {
-		fmt.Printf("  could not fetch subscriptions: %v\n", err)
+		c.Log.Printf("  warning: could not fetch subscriptions: %v", err)
+		fmt.Println("  Subscription info unavailable")
 	} else {
 		found := false
 		for _, sub := range subs.Data {

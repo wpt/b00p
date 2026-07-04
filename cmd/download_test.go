@@ -98,6 +98,18 @@ func TestBoostyURLRe(t *testing.T) {
 			name: "missing_post_segment",
 			url:  "https://boosty.to/alice",
 		},
+		{
+			name: "trailing_path_segment",
+			url:  "https://boosty.to/alice/posts/abc-123/extra",
+		},
+		{
+			name: "unsafe_blog",
+			url:  "https://boosty.to/../posts/abc-123",
+		},
+		{
+			name: "unsafe_post_id",
+			url:  "https://boosty.to/alice/posts/abc%2F123",
+		},
 		// Anchoring regressions: the regex must match the HOST, not any
 		// substring. Unanchored, all three below were accepted and produced
 		// a confusing API 404 instead of a clean "invalid boosty URL".

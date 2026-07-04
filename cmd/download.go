@@ -30,6 +30,7 @@ var (
 var downloadCmd = &cobra.Command{
 	Use:   "download",
 	Short: "Download posts from a boosty blog",
+	Args:  cobra.NoArgs,
 	RunE:  runDownload,
 }
 
@@ -49,21 +50,27 @@ func init() {
 	rootCmd.AddCommand(downloadCmd)
 }
 
+// blogSlugPattern limits a blog slug to safe path characters. Boosty
+// usernames are alphanumeric + hyphen + underscore in practice; the charset
+// blocks "..", "CON", and any FS-significant character before the slug
+// reaches filepath.Join — without it a hostile post URL could redirect
+// output into a parent directory. Both regexes below embed it so the --blog
+// validation and the --url capture group cannot drift apart.
+const blogSlugPattern = `[A-Za-z0-9_-]{1,64}`
+
 var (
 	// boostyURLRe is anchored at the start so the host is the real host —
 	// unanchored, any string CONTAINING "boosty.to/x/posts/y" matched too
 	// (evilboosty.to, boosty.to inside another URL's query/fragment) and the
 	// run proceeded to a confusing API 404 instead of a clean rejection.
-	boostyURLRe = regexp.MustCompile(`^(?:https?://)?(?:www\.|m\.)?boosty\.to/([^/]+)/posts/([^/?#]+)`)
-	// blogNameRe limits the URL-derived blog slug to safe path characters.
-	// Boosty usernames are alphanumeric + hyphen + underscore in practice;
-	// the regex blocks "..", "CON", and any FS-significant character before
-	// it reaches filepath.Join. Without this a hostile post URL could
-	// redirect output into a parent directory.
-	blogNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	boostyURLRe = regexp.MustCompile(`^(?:https?://)?(?:www\.|m\.)?boosty\.to/(` + blogSlugPattern + `)/posts/([A-Za-z0-9_-]+)(?:/)?(?:[?#].*)?$`)
+	blogNameRe  = regexp.MustCompile(`^` + blogSlugPattern + `$`)
 )
 
 func newClient() (*boosty.Client, error) {
+	if authPath == "" {
+		return nil, fmt.Errorf("--auth cannot be empty")
+	}
 	tokens, err := boosty.LoadTokens(authPath)
 	if err != nil {
 		return nil, err
@@ -107,6 +114,12 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	if blogName != "" && !blogNameRe.MatchString(blogName) {
 		return fmt.Errorf("invalid --blog %q: must match %s", blogName, blogNameRe)
 	}
+	if outputDir == "" {
+		return fmt.Errorf("--output cannot be empty")
+	}
+	if numWorkers < 1 {
+		return fmt.Errorf("--workers must be >= 1")
+	}
 
 	// Flag-combination guards: silently no-op flags train the user to add
 	// them defensively without understanding what they do. Fail loud.
@@ -127,7 +140,7 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		if forceDownload {
 			bad = append(bad, "--force")
 		}
-		if numWorkers > 1 {
+		if cmd.Flags().Changed("workers") {
 			bad = append(bad, "--workers")
 		}
 		if len(bad) > 0 {
@@ -163,11 +176,10 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		if matches == nil {
 			return fmt.Errorf("invalid boosty URL: %s (expected https://boosty.to/{blog}/posts/{post-id})", postURL)
 		}
+		// blog is safe for filepath.Join as-is: the boostyURLRe capture group
+		// is the same blogSlugPattern charset blogNameRe enforces for --blog.
 		blog := matches[1]
 		postID := matches[2]
-		if !blogNameRe.MatchString(blog) {
-			return fmt.Errorf("invalid blog name in URL %q: must match %s", blog, blogNameRe)
-		}
 
 		var post boosty.Post
 		if err := c.GetJSON(boosty.PostURL(blog, postID), &post); err != nil {
