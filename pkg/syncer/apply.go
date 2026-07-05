@@ -6,6 +6,7 @@ import (
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/downloader"
+	"github.com/wpt/b00p/pkg/fileutil"
 	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/state"
 )
@@ -119,31 +120,39 @@ func (e *Engine) applyItem(blogDir string, st *state.State, item syncItem) {
 	}
 }
 
-// applyNew handles IsNew posts: no prior state entry exists. SavePost
-// performs the full download flow; on success a fresh state entry is
-// written. Signed video URLs are refreshed before SavePost so the post.json
-// on disk and the state entry both reflect the URLs we actually downloaded
-// against (a stub returned from a now-locked tier keeps the list-endpoint
-// copy — see MaybeRefreshSignedURLs).
+// applyNew handles IsNew posts: no prior state entry exists.
 func (e *Engine) applyNew(st *state.State, item syncItem) {
+	e.c.Log.Printf("  downloading: %s", item.Post.Title)
+	e.saveNewPost(st, &item.Post)
+}
+
+// saveNewPost runs the full first-download flow for an accessible post with
+// no usable prior state: refresh signed video URLs (so post.json and the
+// state entry both reflect the URLs actually downloaded against — see
+// MaybeRefreshSignedURLs), SavePost, then record the fresh state entry.
+// Shared by Sync's applyNew and DownloadAll's worker so the contract guards
+// cannot drift between the two paths. Returns true once the post's files are
+// on disk — a failed state save is logged and counted as a failure, but does
+// not un-download the files (the entry re-syncs as NEW on the next run).
+func (e *Engine) saveNewPost(st *state.State, p *boosty.Post) bool {
 	c := e.c
-	c.Log.Printf("  downloading: %s", item.Post.Title)
-	post := e.MaybeRefreshSignedURLs(&item.Post)
+	post := e.MaybeRefreshSignedURLs(p)
 	dirName, capped, err := e.SavePost(post)
 	if err != nil {
 		c.Log.Printf("  error: %v", err)
 		e.failedPosts.Add(1)
-		return
+		return false
 	}
-	// SavePost returns dirName="" only when !post.HasAccess. classifyPost
-	// guarantees IsNew carries HasAccess=true, so an empty dirName here is
-	// a contract violation — recording an empty DirName in state would
-	// poison future syncs (apply would join blogDir+"" and operate on the
-	// blog root). Refuse to advance state.
+	// SavePost returns dirName="" only when !post.HasAccess. Both callers
+	// queue only accessible posts (classifyPost guarantees IsNew carries
+	// HasAccess=true; DownloadAll skips locked posts before queueing), so an
+	// empty dirName here is a contract violation — recording an empty
+	// DirName in state would poison future syncs (apply would join
+	// blogDir+"" and operate on the blog root). Refuse to advance state.
 	if dirName == "" {
-		c.Log.Printf("  warning: SavePost returned empty dirName for accessible post %q; state not updated", item.Post.ID)
+		c.Log.Printf("  warning: SavePost returned empty dirName for accessible post %q; state not updated", post.ID)
 		e.failedPosts.Add(1)
-		return
+		return false
 	}
 	entry := e.postStateEntry(post, dirName)
 	entry.CommentsCapped = capped
@@ -154,6 +163,7 @@ func (e *Engine) applyNew(st *state.State, item syncItem) {
 		c.Log.Printf("  warning: failed to save state: %v", err)
 		e.failedPosts.Add(1)
 	}
+	return true
 }
 
 // applyJustUnlocked handles posts that were locked at last sync and are now
@@ -320,8 +330,8 @@ func (e *Engine) applyUpdate(blogDir string, st *state.State, item syncItem) {
 	// Defensive MkdirAll: if the user manually removed/renamed the post
 	// directory between syncs, writeJSON / writePostMarkdown / downloadComments
 	// all go through fileutil.WriteFileAtomic → os.CreateTemp(dir, ...) which
-	// ENOENTs on a missing parent. Only DownloadMedia happens to call its own
-	// MkdirAll, so without this line a deleted directory leaves post.json /
+	// ENOENTs on a missing parent. The media downloaders call their own
+	// MkdirAll, but without this line a deleted directory leaves post.json /
 	// post.md / comments.json silently failing every sync. Cheap on the happy
 	// path (idempotent), corrects on the user-edited path.
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -555,7 +565,7 @@ func invalidateMediaForRedownload(media []parser.MediaItem, dir string,
 		}
 		p := filepath.Join(dir, m.Filename)
 		for _, target := range []string{p, p + ".tmp", p + ".tmp.url"} {
-			if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			if err := fileutil.RemoveIfExists(target); err != nil {
 				log.Printf("  error: cannot remove %s: %v (skipping redownload)", target, err)
 				return false
 			}

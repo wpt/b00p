@@ -327,8 +327,8 @@ func TestClassifyPost_NotInState_HasAccess_IsNew(t *testing.T) {
 	if got.IsLockedNew {
 		t.Error("IsLockedNew = true, want false (HasAccess=true)")
 	}
-	if got.DirName == "" {
-		t.Error("DirName = empty, want a formatted name")
+	if got.DirName != "" {
+		t.Errorf("DirName = %q, want empty for out-of-state posts (SavePost decides the real name at apply time)", got.DirName)
 	}
 }
 

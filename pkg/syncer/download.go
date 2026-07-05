@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/state"
@@ -35,11 +36,8 @@ func (e *Engine) DownloadAll() error {
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
-	// state.State is not concurrency-safe (see its doc); e.stMu covers every
-	// Add/Save pair below so workers do not race on st.Posts. The
-	// `downloaded` counter is incremented inside the same critical section
-	// — it looks like a separate race but isn't, because every worker that
-	// touches it already holds e.stMu.
+	// state.State is not concurrency-safe (see its doc); saveNewPost takes
+	// e.stMu around every Add/Save pair so workers do not race on st.Posts.
 
 	var jobs []postJob
 	total := 0
@@ -82,36 +80,19 @@ func (e *Engine) DownloadAll() error {
 
 	c.Log.Printf("Found %d posts to download (workers: %d)", len(jobs), e.cfg.Workers)
 
-	var downloaded int
+	var downloaded atomic.Int64
 	e.failedPosts.Store(0)
 	runWorkerPool(e.cfg.Workers, jobs, func(job postJob) {
 		c.Log.Printf("  [%d] %s", job.num, job.post.Title)
-		// Refresh signed video URLs before saving so post.json and the
-		// state entry both reflect the URLs we actually downloaded against.
-		post := e.MaybeRefreshSignedURLs(&job.post)
-		dirName, capped, err := e.SavePost(post)
-		if err != nil {
-			c.Log.Printf("  error: %v", err)
-			e.failedPosts.Add(1)
-			return
+		if e.saveNewPost(st, &job.post) {
+			downloaded.Add(1)
 		}
-		entry := e.postStateEntry(post, dirName)
-		entry.CommentsCapped = capped
-
-		e.stMu.Lock()
-		defer e.stMu.Unlock()
-		st.Add(post.ID, entry)
-		if err := st.Save(); err != nil {
-			c.Log.Printf("  warning: failed to save state: %v", err)
-			e.failedPosts.Add(1)
-		}
-		downloaded++
 	})
 
 	e.writeBlogIndex(blogDir, st)
 
 	failed := int(e.failedPosts.Load())
-	c.Log.Printf("Done. %d total, %d downloaded, %d already synced, %d failed.", total, downloaded, skippedState, failed)
+	c.Log.Printf("Done. %d total, %d downloaded, %d already synced, %d failed.", total, downloaded.Load(), skippedState, failed)
 	if failed > 0 {
 		return fmt.Errorf("%d post(s) failed; see log above", failed)
 	}

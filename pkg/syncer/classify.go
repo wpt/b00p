@@ -128,12 +128,17 @@ func (s syncItem) Detail() string {
 // applicable flags set. dirFormat governs the freshly-formatted directory
 // name (used for new/unlocked posts where the title may have changed).
 func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) syncItem {
-	dirName := parser.FormatDirName(dirFormat, post.Title, post.PublishTime, post.ID)
 	existing, inState := st.Get(post.ID)
 
-	item := syncItem{Post: post, DirName: dirName, DiskCommentCount: -1}
+	item := syncItem{Post: post, DiskCommentCount: -1}
 
 	if !inState {
+		// DirName stays empty for out-of-state posts: nothing reads it —
+		// display prints titles, the check phases skip !InState items, and
+		// the real directory name is decided at apply time (SavePost formats
+		// it from the possibly-refreshed post and the dirReserver may still
+		// suffix it on collision), so a name computed here could only be
+		// wrong or unused.
 		if post.HasAccess {
 			item.IsNew = true
 		} else {
@@ -155,9 +160,9 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 
 	if existing.Locked {
 		// Was locked, now accessible — treat like UNLOCKED: full re-download.
-		// Use the freshly-formatted dir name in case the title changed.
+		// Use a freshly-formatted dir name in case the title changed.
 		item.JustUnlocked = true
-		item.DirName = dirName
+		item.DirName = parser.FormatDirName(dirFormat, post.Title, post.PublishTime, post.ID)
 		return item
 	}
 
