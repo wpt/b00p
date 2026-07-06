@@ -78,15 +78,7 @@ func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err e
 	}
 	e.c.Log.Printf("  saved post.json: %s", post.Title)
 
-	parsed := parser.ParseBlocks(post.Data)
-	if parsed.SkippedVideos > 0 {
-		e.c.Log.Printf("  warning: %d ok_video block(s) in %s had no MP4 URL — only HLS/DASH variants; videos skipped",
-			parsed.SkippedVideos, post.ID)
-	}
-	if len(parsed.UnknownTypes) > 0 {
-		e.c.Log.Printf("  warning: post %s contains unhandled block type(s) %v — that content is not saved (b00p does not support it yet)",
-			post.ID, parsed.UnknownTypes)
-	}
+	parsed := e.parsePostContent(post)
 
 	// Download media. Errors are joined and returned so the caller can refuse
 	// to mark the post as downloaded in state.
@@ -125,10 +117,32 @@ func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err e
 	return dirName, capped, nil
 }
 
+// parsePostContent parses a post's content blocks, attaches the post-level
+// signedQuery to attachment (audio/file) URLs — the API serves those unsigned,
+// unlike image/video URLs — and logs the content warnings that must never be
+// silent (videos with no MP4 variant, unknown block types). Shared by
+// SavePost and runApplyActions so the signed-query step and the warnings
+// cannot drift between the fresh-download and the update paths.
+func (e *Engine) parsePostContent(post *boosty.Post) parser.ParsedContent {
+	parsed := parser.ParseBlocks(post.Data)
+	parser.ApplySignedQuery(parsed.Media, post.SignedQuery)
+	if parsed.SkippedVideos > 0 {
+		e.c.Log.Printf("  warning: %d ok_video block(s) in %s had no MP4 URL — only HLS/DASH variants; videos skipped",
+			parsed.SkippedVideos, post.ID)
+	}
+	if len(parsed.UnknownTypes) > 0 {
+		e.c.Log.Printf("  warning: post %s contains unhandled block type(s) %v — that content is not saved (b00p does not support it yet)",
+			post.ID, parsed.UnknownTypes)
+	}
+	return parsed
+}
+
 // MaybeRefreshSignedURLs returns a freshly-fetched post when the input has
-// native video — the signed okcdn URLs in the list-endpoint payload may
-// have already expired by the time the apply queue reaches this post, so
-// re-downloading against them burns through three 403s before failing.
+// signed media (native video, or audio/file attachments) — the signed okcdn
+// URLs and the post-level signedQuery in the list-endpoint payload may have
+// already expired by the time the apply queue reaches this post, so
+// downloading against them burns through the retry schedule (or 4xxes fast)
+// before failing.
 //
 // Falls back to the input *Post on any failure:
 //   - GET error: log warn and keep the input (the download retry path will
@@ -141,7 +155,7 @@ func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err e
 // Caller passes the result back into SavePost / state.Add, so post.json,
 // the downloaded bytes, and the state entry all reflect the same payload.
 func (e *Engine) MaybeRefreshSignedURLs(post *boosty.Post) *boosty.Post {
-	if !hasOkVideo(post.Data) {
+	if !hasSignedMedia(post.Data) {
 		return post
 	}
 	var fresh boosty.Post

@@ -3,6 +3,7 @@ package parser
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -346,6 +347,73 @@ func TestParseBlocks_CollectsUnknownTypes(t *testing.T) {
 	want := []string{"poll", "some_future_kind"}
 	if !slices.Equal(got.UnknownTypes, want) {
 		t.Errorf("UnknownTypes = %v, want %v (unique, first-seen order)", got.UnknownTypes, want)
+	}
+}
+
+func TestParseBlocks_AudioAndFileBlocks(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "audio_file", URL: "https://example.com/media/1", Title: "Episode 5.MP3"},
+		{Type: "audio_file", URL: ""},                            // no URL — skipped, still counted in numbering
+		{Type: "audio_file", URL: "https://example.com/media/2"}, // no title, no URL ext → .mp3 fallback
+		{Type: "file", URL: "https://example.com/media/3", Title: "report.pdf"},
+		{Type: "file", URL: "https://example.com/media/4.zip", Title: "notes.v2 final"}, // hostile title ext → URL ext
+		{Type: "file", URL: "https://example.com/media/5", Title: "no extension"},       // nothing plausible → no ext
+	}
+	result := ParseBlocks(blocks)
+
+	want := []MediaItem{
+		{Type: "audio", URL: "https://example.com/media/1", Title: "Episode 5.MP3", Filename: "audio_001.mp3"},
+		{Type: "audio", URL: "https://example.com/media/2", Filename: "audio_003.mp3"},
+		{Type: "file", URL: "https://example.com/media/3", Title: "report.pdf", Filename: "file_001.pdf"},
+		{Type: "file", URL: "https://example.com/media/4.zip", Title: "notes.v2 final", Filename: "file_002.zip"},
+		{Type: "file", URL: "https://example.com/media/5", Title: "no extension", Filename: "file_003"},
+	}
+	if !slices.Equal(result.Media, want) {
+		t.Errorf("Media = %+v\nwant %+v", result.Media, want)
+	}
+	if len(result.UnknownTypes) != 0 {
+		t.Errorf("UnknownTypes = %v, want empty (audio_file and file are supported)", result.UnknownTypes)
+	}
+}
+
+func TestApplySignedQuery(t *testing.T) {
+	media := []MediaItem{
+		{Type: "audio", URL: "https://example.com/media/1", Filename: "audio_001.mp3"},
+		{Type: "file", URL: "https://example.com/media/2", Filename: "file_001.pdf"},
+		{Type: "file", URL: "https://example.com/media/3?sig=already", Filename: "file_002.pdf"},
+		{Type: "image", URL: "https://example.com/i.jpg", Filename: "image_001.jpg"},
+		{Type: "video", URL: "https://example.com/v.mp4", Filename: "video_001.mp4"},
+		{Type: "external_video", URL: "https://example.com/watch", Filename: "external_video_001"},
+	}
+
+	ApplySignedQuery(media, "?sign=abc")
+
+	// Only unsigned audio/file URLs gain the query.
+	if got, want := media[0].URL, "https://example.com/media/1?sign=abc"; got != want {
+		t.Errorf("audio URL = %q, want %q", got, want)
+	}
+	if got, want := media[1].URL, "https://example.com/media/2?sign=abc"; got != want {
+		t.Errorf("file URL = %q, want %q", got, want)
+	}
+	// Already-signed and non-attachment URLs stay untouched.
+	for _, i := range []int{2, 3, 4, 5} {
+		if strings.Contains(media[i].URL, "sign=abc") {
+			t.Errorf("media[%d] (%s) URL gained signed query: %q", i, media[i].Type, media[i].URL)
+		}
+	}
+}
+
+func TestApplySignedQuery_BareQueryAndEmpty(t *testing.T) {
+	media := []MediaItem{{Type: "file", URL: "https://example.com/media/1"}}
+	ApplySignedQuery(media, "sign=abc") // no leading "?" — must be added
+	if got, want := media[0].URL, "https://example.com/media/1?sign=abc"; got != want {
+		t.Errorf("URL = %q, want %q", got, want)
+	}
+
+	media = []MediaItem{{Type: "file", URL: "https://example.com/media/2"}}
+	ApplySignedQuery(media, "")
+	if got, want := media[0].URL, "https://example.com/media/2"; got != want {
+		t.Errorf("URL = %q, want %q (empty signedQuery must be a no-op)", got, want)
 	}
 }
 

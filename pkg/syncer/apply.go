@@ -418,15 +418,7 @@ func (e *Engine) runApplyActions(dir string, fullPost *boosty.Post, edited bool,
 
 	var parsed parser.ParsedContent
 	if actions.Media || actions.MD {
-		parsed = parser.ParseBlocks(fullPost.Data)
-		if parsed.SkippedVideos > 0 {
-			c.Log.Printf("  warning: %d ok_video block(s) in %s had no MP4 URL — only HLS/DASH variants; videos skipped",
-				parsed.SkippedVideos, fullPost.ID)
-		}
-		if len(parsed.UnknownTypes) > 0 {
-			c.Log.Printf("  warning: post %s contains unhandled block type(s) %v — that content is not saved (b00p does not support it yet)",
-				fullPost.ID, parsed.UnknownTypes)
-		}
+		parsed = e.parsePostContent(fullPost)
 	}
 
 	if actions.Media {

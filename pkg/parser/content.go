@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -14,9 +15,13 @@ import (
 
 // MediaItem represents a downloadable media file from a post.
 type MediaItem struct {
-	Type     string // "image", "video", "external_video"
+	Type     string // "image", "video", "external_video", "audio", "file"
 	URL      string
 	Filename string
+	// Title is the author-supplied display name for audio/file attachments
+	// (the original filename as uploaded); used as the link label in
+	// generated markdown. Empty for other media types.
+	Title string
 }
 
 // ParsedContent is the result of parsing a post's content blocks.
@@ -88,7 +93,7 @@ func ExtractText(raw string) string {
 // assembled paragraph.
 func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 	var result ParsedContent
-	var imgIdx, vidIdx int
+	var imgIdx, vidIdx, audIdx, fileIdx int
 	var para []string
 
 	flushPara := func() {
@@ -154,6 +159,32 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 				})
 			}
 
+		case "audio_file":
+			flushPara()
+			audIdx++
+			if block.URL == "" {
+				continue
+			}
+			result.Media = append(result.Media, MediaItem{
+				Type:     "audio",
+				URL:      block.URL,
+				Title:    block.Title,
+				Filename: fmt.Sprintf("audio_%03d%s", audIdx, attachmentExt(block.Title, block.URL, ".mp3")),
+			})
+
+		case "file":
+			flushPara()
+			fileIdx++
+			if block.URL == "" {
+				continue
+			}
+			result.Media = append(result.Media, MediaItem{
+				Type:     "file",
+				URL:      block.URL,
+				Title:    block.Title,
+				Filename: fmt.Sprintf("file_%03d%s", fileIdx, attachmentExt(block.Title, block.URL, "")),
+			})
+
 		case "link":
 			text := ExtractText(block.Content)
 			if strings.TrimSpace(text) == "" {
@@ -191,6 +222,51 @@ func imageExt(s string) string {
 		return ext
 	default:
 		return ".jpg"
+	}
+}
+
+// plausibleExtRe bounds what attachmentExt will accept as a filename
+// extension: a dot followed by 1-10 lowercased alphanumerics. Anything else
+// (spaces, FS-unsafe characters, ".v2 final"-style non-extensions) is
+// author-controlled noise that must not end up in an on-disk filename.
+var plausibleExtRe = regexp.MustCompile(`^\.[a-z0-9]{1,10}$`)
+
+// attachmentExt picks the filename extension for an audio/file attachment:
+// the author-supplied title's extension when plausible, else the URL path's,
+// else fallback. Titles are the original upload names ("report.pdf"), so the
+// title extension is usually the truthful one; the URL path often has none.
+func attachmentExt(title, url, fallback string) string {
+	if ext := strings.ToLower(path.Ext(title)); plausibleExtRe.MatchString(ext) {
+		return ext
+	}
+	if ext := urlPathExt(url); plausibleExtRe.MatchString(ext) {
+		return ext
+	}
+	return fallback
+}
+
+// ApplySignedQuery attaches the post-level signedQuery to media items whose
+// URLs the API serves unsigned — audio and file attachments. Image and video
+// URLs come pre-signed per block, and external videos are third-party links,
+// so those are left untouched, as is any URL that already carries a query
+// string. The API sends signedQuery with a leading "?"; a bare query string
+// is accepted too. Call it after ParseBlocks, passing Post.SignedQuery, or
+// attachment downloads will 4xx.
+func ApplySignedQuery(media []MediaItem, signedQuery string) {
+	if signedQuery == "" {
+		return
+	}
+	if !strings.HasPrefix(signedQuery, "?") {
+		signedQuery = "?" + signedQuery
+	}
+	for i := range media {
+		if media[i].Type != "audio" && media[i].Type != "file" {
+			continue
+		}
+		if media[i].URL == "" || strings.Contains(media[i].URL, "?") {
+			continue
+		}
+		media[i].URL += signedQuery
 	}
 }
 

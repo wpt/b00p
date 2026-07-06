@@ -135,6 +135,21 @@ func hasOkVideo(blocks []boosty.ContentBlock) bool {
 	return false
 }
 
+// hasSignedMedia reports whether the post carries content whose download
+// URLs are signed and can go stale between the list call and the apply:
+// native ok_video (per-block signed okcdn URLs) and audio/file attachments
+// (post-level signedQuery). Gates MaybeRefreshSignedURLs; checkVideoSizes
+// keeps using hasOkVideo because it validates videos only.
+func hasSignedMedia(blocks []boosty.ContentBlock) bool {
+	for _, b := range blocks {
+		switch b.Type {
+		case "ok_video", "audio_file", "file":
+			return true
+		}
+	}
+	return false
+}
+
 // checkRemoteVideoSize compares local file size with the server's Content-Length
 // obtained via HEAD. The okcdn signed URLs bind to the UA used to fetch them, so
 // we must reuse the client's User-Agent.

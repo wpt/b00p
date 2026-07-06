@@ -65,6 +65,10 @@ func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 			b.WriteString(fmt.Sprintf("![%s](%s)\n\n", m.Filename, m.Filename))
 		case "video":
 			b.WriteString(fmt.Sprintf("[Video: %s](%s)\n\n", m.Filename, m.Filename))
+		case "audio":
+			b.WriteString(fmt.Sprintf("[Audio: %s](%s)\n\n", attachmentLabel(m), m.Filename))
+		case "file":
+			b.WriteString(fmt.Sprintf("[File: %s](%s)\n\n", attachmentLabel(m), m.Filename))
 		case "external_video":
 			b.WriteString(formatMarkdownLink("External Video", m.URL))
 			b.WriteString("\n\n")
@@ -72,4 +76,15 @@ func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 	}
 
 	return b.String()
+}
+
+// attachmentLabel is the link label for an audio/file attachment: the
+// author-supplied original name (escaped — it is free text that may contain
+// markdown metacharacters), falling back to the parser-generated filename,
+// which is metacharacter-free by construction and needs no escaping.
+func attachmentLabel(m MediaItem) string {
+	if strings.TrimSpace(m.Title) == "" {
+		return m.Filename
+	}
+	return EscapeMarkdownLabel(m.Title)
 }

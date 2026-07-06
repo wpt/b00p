@@ -99,6 +99,31 @@ func TestHasOkVideo(t *testing.T) {
 	}
 }
 
+// hasSignedMedia gates MaybeRefreshSignedURLs: audio/file attachments need a
+// fresh post-level signedQuery just like ok_video needs fresh okcdn URLs —
+// an attachment-only post saved against a stale list-endpoint payload would
+// 4xx on download.
+func TestHasSignedMedia(t *testing.T) {
+	cases := []struct {
+		name   string
+		blocks []boosty.ContentBlock
+		want   bool
+	}{
+		{"empty", nil, false},
+		{"text and external video", []boosty.ContentBlock{{Type: "text"}, {Type: "video", URL: "https://example.com/x"}}, false},
+		{"ok_video", []boosty.ContentBlock{{Type: "ok_video"}}, true},
+		{"audio attachment", []boosty.ContentBlock{{Type: "audio_file", URL: "https://example.com/a"}}, true},
+		{"file attachment", []boosty.ContentBlock{{Type: "text"}, {Type: "file", URL: "https://example.com/f"}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasSignedMedia(tc.blocks); got != tc.want {
+				t.Errorf("hasSignedMedia = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCheckRemoteVideoSize_Match(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "video_001.mp4")

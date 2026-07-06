@@ -125,3 +125,29 @@ func TestGenerateMarkdown_BodyLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateMarkdown_Attachments(t *testing.T) {
+	post := &boosty.Post{
+		ID:          "abc",
+		Title:       "T",
+		PublishTime: 1700000000,
+		User:        boosty.PostUser{Name: "Author", BlogURL: "blog"},
+	}
+	parsed := ParsedContent{
+		Media: []MediaItem{
+			{Type: "audio", Filename: "audio_001.mp3", Title: "Episode [5].mp3"},
+			{Type: "file", Filename: "file_001.pdf"}, // no title → filename label
+		},
+	}
+
+	md := GenerateMarkdown(post, parsed)
+	want := []string{
+		`[Audio: Episode \[5\].mp3](audio_001.mp3)`, // author title escaped as label
+		`[File: file_001.pdf](file_001.pdf)`,
+	}
+	for _, s := range want {
+		if !strings.Contains(md, s) {
+			t.Errorf("missing %q in markdown\n%s", s, md)
+		}
+	}
+}
