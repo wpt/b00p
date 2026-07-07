@@ -4,7 +4,14 @@
 [![CI](https://github.com/wpt/b00p/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/wpt/b00p/actions/workflows/ci.yml)
 [![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/wpt/b00p/gh-pages/coverage.json)](https://github.com/wpt/b00p/actions/workflows/ci.yml)
 
-CLI parser and content downloader for [boosty.to](https://boosty.to). Downloads posts, images, native videos, comments. Also usable as a Go library.
+CLI content downloader for [boosty.to](https://boosty.to). Archives everything your subscriptions give you access to. Also usable as a Go library.
+
+- **Posts** — full JSON payload, optional markdown rendering with frontmatter
+- **Media** — images, native videos (best MP4 quality), audio and file attachments
+- **Comments** — with inlined replies
+- **External videos** — YouTube/VK/OK embeds archived as links, optionally downloaded via [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- **Smart sync** — incremental updates with a reviewable diff: new/edited posts, new comments, unlocked tiers, on-disk integrity checks
+- **Crash-safe** — atomic writes, HTTP range resume, retry with backoff; interrupted runs pick up where they left off
 
 ## Installation
 
@@ -22,7 +29,7 @@ Rename it to `b00p` (or `b00p.exe` on Windows) and put it anywhere on your `PATH
 
 ### Build from source
 
-Requires **Go 1.26.3+**:
+Requires **Go 1.26.4+**:
 
 ```bash
 go install github.com/wpt/b00p@latest
@@ -142,19 +149,19 @@ b00p download --blog username --sync --check-files
 >
 > `--force` is rejected together with `--sync` (sync already detects what needs updating). Use `--force` only without `--sync`.
 >
-> `--url` is single-post: combine it only with `--md`, `--comments`, `--download-external`, `--format`. Passing `--sync`, `--check-media`, `--check-files`, `--yes`, `--force`, or `--workers > 1` is a hard error (`--url is single-post and cannot be combined with: [...]`).
+> `--url` is single-post: combine it only with `--md`, `--comments`, `--download-external`, `--format`. Passing `--sync`, `--check-media`, `--check-files`, `--yes`, `--force`, or an explicit `--workers` (even `--workers 1`) is a hard error (`--url is single-post and cannot be combined with: [...]`).
 
 #### Sync output
 
 ```
 Syncing username...
   [NEW] Brand new accessible post
-  [UNLOCKED] Previously locked post
-  [UPDATED] Edited post
+  [UNLOCKED] Previously locked post (was locked, now accessible)
+  [UPDATED] Edited post (post edited)
   [COMMENTS] Comments thread (comments: 5 → 8)
-  [UPDATED,VIDEO_MISMATCH] Reuploaded with new video (video_001.mp4: local 1.2 GB vs remote 1.4 GB)
+  [UPDATED,VIDEO_MISMATCH] Reuploaded with new video (post edited; video_001.mp4: local 1.2 GB vs remote 1.4 GB)
   [FILES_MISSING] Stale entry (missing comments.json)
-  [LOCKED] Downgraded post
+  [LOCKED] Downgraded post (was accessible, now locked)
 
 Sync summary:
   1 new posts
@@ -176,7 +183,7 @@ Apply changes? [y/N]
 - **UNLOCKED** — was locked, now accessible (subscription upgraded). Triggers full re-download.
 - **UPDATED** — author edited the post (`updatedAt` changed).
 - **COMMENTS** — comment-count drift. For posts with `hasComments=true`, the on-disk count (top-level + inlined replies in `comments.json`) is compared to the API count, with disk reality winning over the cached state count. If `comments.json` is missing or unreadable, any non-zero API count triggers a refetch. For posts with `hasComments=false`, the legacy state-vs-API count comparison applies — when the API count differs from what state recorded at last save, sync fires `COMMENTS` and writes `comments.json` (after which `hasComments` flips to `true` and subsequent runs use the disk-count comparison). Posts flagged `commentsCapped` (see [State Tracking](#state-tracking)) suppress the disk<API mismatch trigger; the disk>API direction (deletions) still fires and clears the flag.
-- **VIDEO_MISMATCH** — native `ok_video` discrepancy: local file is missing, the HEAD request returns non-200, or `Content-Length` differs from the local file size. Transient HEAD errors are logged and skipped. External videos (YouTube/VK/OK) are not validated. Requires `--check-media`.
+- **VIDEO_MISMATCH** — native `ok_video` discrepancy: local file is missing, the HEAD request returns non-200, or `Content-Length` differs from the local file size. Transient HEAD errors are logged and skipped. Only native videos are validated — external videos and audio/file attachments are not. Requires `--check-media`.
 - **FILES_MISSING** — expected files absent on disk. `post.json` is always required; `comments.json` and `post.md` are required only when state says they were previously written. The apply phase re-fetches and rewrites whatever the check flagged; it doesn't just report. Inaccessible (locked) posts are skipped — they can't be re-fetched while locked, so flagging them would only produce a guaranteed-failing apply. Requires `--check-files`.
 - **LOCKED** — was accessible, now locked. On-disk data is preserved; only state's `locked` flag is flipped.
 
@@ -210,7 +217,7 @@ Global flags (apply to every command):
 | `--check-media` | `false` | With `--sync`: validate native video sizes via HEAD. Without `--sync`: hard error. |
 | `--check-files` | `false` | With `--sync`: verify expected files exist on disk. Without `--sync`: hard error. |
 | `--format` | `{date}_{title}` | Post directory name format |
-| `--workers` | `1` | Concurrent post processing — parallelises `download --blog` (default mode), `download --blog --sync` apply phase, and `--check-media` HEAD requests. Values below 1 are clamped to 1. |
+| `--workers` | `1` | Concurrent post processing — parallelises `download --blog` (default mode), `download --blog --sync` apply phase, and `--check-media` HEAD requests. Values below 1 are rejected (`--workers must be >= 1`). |
 
 ## Directory Name Format
 
@@ -238,14 +245,18 @@ output/username/
     comments.json                          # comments (with --comments)
     image_001.jpg                          # images
     video_001.mp4                          # native videos (best MP4)
+    audio_001.mp3                          # audio attachments
+    file_001.pdf                           # file attachments
     external_video_001.<ext>               # external videos (with --download-external)
 ```
 
 `post.json` always contains links to external videos. `post.md` includes them only when generated with `--md`.
 
+Audio and file attachments get numbered on-disk names (`audio_001.mp3`, `file_001.pdf`) with the extension taken from the author's original filename (falling back to the URL when the name has none); `post.md` links each one under its original name when the author supplied one, so nothing readable is lost.
+
 `index.md` is a clickable list of every tracked post (title → directory, comment counts, locked markers), sorted by directory name — chronological under the default `{date}_{title}` format. It is regenerated from `_state.json` at the end of every `--blog` download/sync run, including no-change runs, so deleting it self-heals (single-post `--url` downloads don't touch it). Don't edit it by hand.
 
-Content block types b00p doesn't support yet (e.g. audio attachments or file blocks) are skipped with a per-post warning naming the type — if you see one, that content exists on Boosty but is not in your archive.
+Content block types b00p doesn't support yet (e.g. polls) are skipped with a per-post warning naming the type — if you see one, that content exists on Boosty but is not in your archive.
 
 ## State Tracking
 
@@ -267,7 +278,7 @@ Locked posts are not stored — after upgrading your subscription they are downl
 
 ## Reliability
 
-- **Retry with backoff**: API GETs retry 3× (5s / 15s / 30s) on transient request-side errors (transport, 5xx, 429 — including those during a token refresh) — other 4xx responses, JSON decode failures, and a token refresh the server *rejected* with 4xx (dead refresh token: retrying a deterministic verdict only delays the actionable error) all fail fast. Media downloads retry 3× on transient errors (network failures, 5xx, 429, 416-after-resume, create/write/close errors); deterministic 4xx download statuses (400/403/404/410 — expired signed URL, deleted media) fail fast, and for 400/403/410 the error includes a hint that the signed CDN URL likely expired or IP-bound — rerun sync to refresh. HEAD checks for `--check-media` are not retried (transient HEAD failure logs a warning, the per-post check is skipped, no `VIDEO_MISMATCH` is raised on transport errors). yt-dlp is bounded by a 20-minute timeout per external video; a timeout reports `timed out after 20m0s` and the post still saves.
+- **Retry with backoff**: API GETs retry 3× (5s / 15s / 30s) on transient request-side errors (transport failures — including a connection dropped mid-response — 5xx, 429, and any of those during a token refresh) — other 4xx responses, malformed JSON, and a token refresh the server *rejected* with 4xx (dead refresh token: retrying a deterministic verdict only delays the actionable error) all fail fast. Media downloads retry 3× on transient errors (network failures, 5xx, 429, 416-after-resume, create/write/close errors); deterministic 4xx download statuses (400/403/404/410 — expired signed URL, deleted media) fail fast, and for 400/403/410 the error includes a hint that the signed CDN URL likely expired or IP-bound — rerun sync to refresh. HEAD checks for `--check-media` are not retried (transient HEAD failure logs a warning, the per-post check is skipped, no `VIDEO_MISMATCH` is raised on transport errors). yt-dlp is bounded by a 20-minute timeout per external video; a timeout reports `timed out after 20m0s` and the post still saves.
 - **Idle-read watchdog**: long media downloads carry an idle-byte watchdog. If the server stops sending bytes for 60 seconds (wedged TCP connection that never RST/FINs), the request is cancelled with cause `idle timeout: no response body bytes for 60s` and the normal retry loop applies. Slow-but-live streams keep going forever.
 - **HTTP Range resume**: partial `.tmp` files from prior retries are reused via `Range: bytes=N-`. A `.tmp.url` sidecar pins the URL the partial was downloaded against; on signed-URL refresh between attempts (or between runs), the sidecar mismatch drops the stale partial and starts fresh.
 - **Atomic writes**: `_state.json`, `post.json`, `post.md`, `comments.json`, and `auth.json` (after refresh) are written via temp file + fsync + rename. Media downloads use temp file + rename (no fsync, to avoid stalling multi-GB writes) — a SIGKILL or crash mid-download leaves a `.tmp` plus `.tmp.url` orphan that the next attempt resumes from (if the URL still matches) or discards (if it doesn't). The parent directory is not fsynced, so power loss is not strongly defended against.
@@ -373,6 +384,10 @@ func main() {
         }
 
         parsed := parser.ParseBlocks(post.Data)
+        // Audio/file attachment URLs are served unsigned — attach the
+        // post-level signed query before downloading them.
+        parser.ApplySignedQuery(parsed.Media, post.SignedQuery)
+
         for _, text := range parsed.TextParts {
             fmt.Println(text)
         }
