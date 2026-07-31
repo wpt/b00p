@@ -93,12 +93,17 @@ type CommentsResponse struct {
 
 // Comment is a post comment.
 type Comment struct {
-	ID         string            `json:"id"`
-	IntID      int64             `json:"intId"` // the comment's own numeric id (NOT the author's — that is Author.ID)
-	Author     CommentAuthor     `json:"author"`
-	Data       []ContentBlock    `json:"data"`
-	CreatedAt  int64             `json:"createdAt"`
-	ReplyCount int               `json:"replyCount"`
+	ID        string         `json:"id"`
+	IntID     int64          `json:"intId"` // the comment's own numeric id (NOT the author's — that is Author.ID)
+	Author    CommentAuthor  `json:"author"`
+	Data      []ContentBlock `json:"data"`
+	CreatedAt int64          `json:"createdAt"`
+	// IsDeleted marks a comment its author removed: the endpoint still returns
+	// it as a stub (empty Data; author and timestamps intact) so reply threads
+	// under it keep their parent. Post.Count.Comments and ReplyCount exclude
+	// deleted comments, so counting code must skip stubs too.
+	IsDeleted  bool              `json:"isDeleted"`
+	ReplyCount int               `json:"replyCount"` // live (non-deleted) replies; Replies.Data includes stubs, so the two counts differ in either direction
 	Replies    *CommentsResponse `json:"replies,omitempty"`
 }
 

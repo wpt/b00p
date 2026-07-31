@@ -527,8 +527,8 @@ func TestEngine_ApplyUpdate_ReservedDirGetsSuffix(t *testing.T) {
 // (uncapped) is distinguishable from one that hit the cap. A flipped
 // comparison here silently sets commentsCapped on boundary posts and
 // permanently suppresses their comment refetch; the per-thread signal
-// (replyCount > inlined replies) is the only way reply truncation is ever
-// detected.
+// (fewer live replies inlined than the live replyCount claims exist) is the
+// only way reply truncation is ever detected.
 func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
 	mk := func(n int) []boosty.Comment {
 		cs := make([]boosty.Comment, n)
@@ -554,6 +554,30 @@ func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
 				Data: []boosty.Comment{{ID: "r1"}},
 			}},
 		}, false},
+		// ReplyCount counts live replies only, so the per-thread signal must
+		// compare live-to-live: 2 items inlined but one is a deleted stub →
+		// only 1 of 2 live replies actually stored → capped. Raw
+		// len(Data) == ReplyCount here, which would mask the truncation.
+		{"deleted_stub_padding_doesnt_mask_truncation", []boosty.Comment{
+			{ID: "c1", ReplyCount: 2, Replies: &boosty.CommentsResponse{
+				Data: []boosty.Comment{{ID: "r1"}, {ID: "r2", IsDeleted: true}},
+			}},
+		}, true},
+		// The reverse padding shape: all live replies present plus a stub on
+		// top (len(Data) > ReplyCount, the common deleted-comment case) is
+		// fully stored — not capped.
+		{"deleted_stub_extra_uncapped", []boosty.Comment{
+			{ID: "c1", ReplyCount: 1, Replies: &boosty.CommentsResponse{
+				Data: []boosty.Comment{{ID: "r1"}, {ID: "r2", IsDeleted: true}},
+			}},
+		}, false},
+		// A thread claiming replies but carrying no replies object at all:
+		// nothing was inlined, so its live replies are unreachable — capped
+		// (fail-closed), not an endless COMMENTS refetch loop that never
+		// recovers them.
+		{"nil_replies_with_replycount_capped", []boosty.Comment{
+			{ID: "c1", ReplyCount: 5},
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -667,6 +691,62 @@ func TestEngine_Sync_NewPostAutoApply(t *testing.T) {
 	if !st.Has("p1") {
 		t.Errorf("Sync did not record NEW post p1; log:\n%s", f.log.joined())
 	}
+}
+
+// A state entry with an empty DirName used to aim the whole apply phase at the
+// blog root (filepath.Join(blogDir, "") == blogDir), writing post artefacts next
+// to _state.json while Sync still exited 0. The post must be re-downloaded into
+// a real directory and the bad entry replaced.
+func TestEngine_Sync_EmptyDirNameEntryDoesNotWriteIntoBlogRoot(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	out := t.TempDir()
+	blogDir := filepath.Join(out, blog)
+	if err := os.MkdirAll(blogDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Add("p1", state.PostEntry{Title: "Poisoned", DirName: "", UpdatedAt: 100, HasMd: true})
+	if err := st.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	post := boosty.Post{
+		ID: "p1", Title: "Poisoned", HasAccess: true,
+		PublishTime: 1700000000, UpdatedAt: 200, // updatedAt drift → actionable
+		Data: []boosty.ContentBlock{{Type: "text", Content: `["body","unstyled",[]]`}},
+	}
+	f.PostsList(blog, post)
+	f.SinglePost(blog, "p1", post)
+
+	cfg := Config{Blog: blog, OutputDir: out, AutoApply: true, WithMD: true, Workers: 1}
+	if err := New(f.client, cfg).Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	for _, name := range []string{"post.json", "post.md", "comments.json"} {
+		if _, err := os.Stat(filepath.Join(blogDir, name)); err == nil {
+			t.Errorf("%s written into the blog root; log:\n%s", name, f.log.joined())
+		}
+	}
+
+	reloaded, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := reloaded.Get("p1")
+	if !ok {
+		t.Fatalf("p1 missing from state after Sync; log:\n%s", f.log.joined())
+	}
+	if entry.DirName == "" {
+		t.Fatalf("state still carries an empty DirName; log:\n%s", f.log.joined())
+	}
+	requireFile(t, filepath.Join(blogDir, entry.DirName, "post.json"))
+	requireFile(t, filepath.Join(blogDir, entry.DirName, "post.md"))
 }
 
 // Sync without AutoApply must consult cfg.In for confirmation. "y\n" applies

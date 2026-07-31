@@ -52,6 +52,28 @@ func TestDiskCommentCount_WithInlinedReplies(t *testing.T) {
 	}
 }
 
+func TestDiskCommentCount_DeletedStubsExcluded(t *testing.T) {
+	dir := t.TempDir()
+	// Boosty returns deleted comments as isDeleted stubs (empty data, author
+	// and time intact) and excludes them from post.Count.Comments. Counting
+	// stubs would hold disk above API forever, refiring COMMENTS on every
+	// sync. 3 top-level (1 deleted, with its live replies still attached) +
+	// 3 inlined replies (1 deleted) → live count 4.
+	os.WriteFile(filepath.Join(dir, "comments.json"), []byte(`[
+		{"id":"1","isDeleted":true,"replies":{"data":[{"id":"1a"},{"id":"1b","isDeleted":true}],"extra":{"isLast":true}}},
+		{"id":"2","replies":{"data":[{"id":"2a"}],"extra":{"isLast":true}}},
+		{"id":"3"}
+	]`), 0644)
+
+	n, ok := diskCommentCount(dir)
+	if !ok {
+		t.Fatal("diskCommentCount ok = false, want true")
+	}
+	if n != 4 {
+		t.Errorf("diskCommentCount = %d, want 4 (2 live top-level + 2 live replies)", n)
+	}
+}
+
 func TestDiskCommentCount_EmptyArray(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "comments.json"), []byte(`[]`), 0644)
@@ -329,6 +351,54 @@ func TestClassifyPost_NotInState_HasAccess_IsNew(t *testing.T) {
 	}
 	if got.DirName != "" {
 		t.Errorf("DirName = %q, want empty for out-of-state posts (SavePost decides the real name at apply time)", got.DirName)
+	}
+}
+
+// An empty DirName collapses every blogDir-relative path onto the blog root
+// (filepath.Join(dir, "") == dir). The entry must be discarded and the post
+// re-classified as NEW instead of updated in place.
+func TestClassifyPost_InState_EmptyDirName_ReclassifiedAsNew(t *testing.T) {
+	blogDir := t.TempDir()
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	// The file the poisoned entry would have been counted against. Reading it
+	// is exactly the bug, so its presence must not change the verdict.
+	os.WriteFile(filepath.Join(blogDir, "comments.json"),
+		[]byte(`[{"id":"1"},{"id":"2"}]`), 0644)
+
+	st.Add("post1", state.PostEntry{
+		Title:       "Hello",
+		DirName:     "",
+		UpdatedAt:   100,
+		HasComments: true,
+		HasMd:       true,
+	})
+
+	post := boosty.Post{ID: "post1", Title: "Hello", HasAccess: true, UpdatedAt: 200}
+	post.PublishTime = 1700000000
+	post.Count.Comments = 5
+
+	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	if !got.IsNew {
+		t.Error("IsNew = false, want true (unusable state entry discarded)")
+	}
+	if got.InState {
+		t.Error("InState = true, want false")
+	}
+	if !got.DirNameMissing {
+		t.Error("DirNameMissing = false, want true")
+	}
+	if got.Edited || got.NewComments {
+		t.Errorf("Edited=%v NewComments=%v, want both false — the in-place update path must never run against the blog root",
+			got.Edited, got.NewComments)
+	}
+	if got.DiskCommentCount != -1 {
+		t.Errorf("DiskCommentCount = %d, want -1 (the blog root's comments.json must not be read)", got.DiskCommentCount)
+	}
+	if d := got.Detail(); !strings.Contains(d, "no directory name") {
+		t.Errorf("Detail() = %q, want it to name the discarded entry so the re-download is not silent", d)
 	}
 }
 

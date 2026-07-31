@@ -171,10 +171,11 @@ func (e *Engine) MaybeRefreshSignedURLs(post *boosty.Post) *boosty.Post {
 }
 
 // downloadComments fetches and saves comments.json. Returns capped=true when
-// the fetch hit Boosty's structural per-post limit (top-level count >=
-// commentsPageLimit, or any single thread inlined replyCount > defaultReplyLimit
-// replies) so the caller can mark state to stop re-triggering NewComments
-// against an API count the server will never let us reach. expectedCount is
+// the fetch hit Boosty's structural per-post limit (more than
+// commentsCapThreshold top-level items in the single page the endpoint
+// serves, or a thread that inlined fewer live replies than its ReplyCount)
+// so the caller can mark state to stop re-triggering NewComments against an
+// API count the server will never let us reach. expectedCount is
 // post.Count.Comments at fetch time — used only for the warning, not for
 // disk accounting.
 func (e *Engine) downloadComments(postID, dir string, expectedCount int) (capped bool, err error) {
@@ -190,35 +191,23 @@ func (e *Engine) downloadComments(postID, dir string, expectedCount int) (capped
 		return false, err
 	}
 
-	// Disk count includes inlined replies — matches the value classifyPost
-	// computes via diskCommentCount. Cap detection: either we hit the top-
-	// level page limit (>100 top-level threads exist), or any single thread
-	// reported more replies than we could inline.
-	diskCount := len(allComments)
-	for _, c := range allComments {
-		if c.Replies != nil {
-			diskCount += len(c.Replies.Data)
-		}
-	}
-	// Two cap signals: top-level (>100 threads in a single page = server
-	// truncated the list) or per-thread (a thread reports more replies than
-	// the server actually inlined, i.e. defaultReplyLimit covered fewer than
-	// existed).
-	if len(allComments) > commentsCapThreshold {
-		capped = true
-	}
-	for _, c := range allComments {
-		if c.Replies != nil && len(c.Replies.Data) < c.ReplyCount {
-			capped = true
-			break
-		}
-	}
+	// Disk count is the same liveCommentCount that classifyPost later reads
+	// back via diskCommentCount, so the write-side and read-side counting
+	// contracts cannot drift.
+	//
+	// Two cap signals: top-level (>100 items in a single page = server
+	// truncated the list; raw length, since deleted stubs occupy page slots
+	// too) or per-thread (replyTruncated: a thread reports more live replies
+	// than the server actually inlined — compared live-to-live, so deleted
+	// stubs padding Replies.Data cannot mask truncation of live replies).
+	diskCount, replyTruncated := liveCommentCount(allComments)
+	capped = replyTruncated || len(allComments) > commentsCapThreshold
 
 	if capped && expectedCount > diskCount {
 		e.c.Log.Printf("  warning: comments capped for %s: %d of %d (API limit; remaining unreachable via current endpoint)",
 			postID, diskCount, expectedCount)
 	}
-	e.c.Log.Printf("  saved comments.json (%d comments)", len(allComments))
+	e.c.Log.Printf("  saved comments.json (%d comments)", diskCount)
 	return capped, nil
 }
 

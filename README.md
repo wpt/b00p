@@ -25,7 +25,7 @@ Grab the binary for your OS from [GitHub Releases](https://github.com/wpt/b00p/r
 
 Rename it to `b00p` (or `b00p.exe` on Windows) and put it anywhere on your `PATH`.
 
-> On Linux/macOS make the binary executable: `chmod +x b00p`. On Windows, run it as `.\b00p.exe` from PowerShell or `b00p` from any directory on `PATH`. Commands below use `b00p` — substitute `.\b00p.exe` if needed. Linux and Windows are first-class targets; macOS is best-effort. CI test-executes the suite on Linux and Windows; macOS builds are produced by goreleaser but not test-executed.
+> On Linux/macOS make the binary executable: `chmod +x b00p`. On Windows, run it as `.\b00p.exe` from PowerShell or `b00p` from any directory on `PATH`. Commands below use `b00p` — substitute `.\b00p.exe` if needed.
 
 ### Build from source
 
@@ -60,8 +60,6 @@ go build -o b00p .
 (If you cloned the repo, `auth.json.example` is in the repo root — `cp auth.json.example auth.json` works there.)
 
 Only `accessToken` is required. With `refreshToken`, b00p auto-refreshes on expiry and on 401; without it you'll re-paste tokens whenever they expire.
-
-> Tokens auto-refresh on expiry (when `expiresAt` has passed) and on 401. The refreshed file is written via temp-file + rename, so an interrupted refresh cannot leave you with empty credentials. `auth.json` is in `.gitignore`.
 
 5. Verify auth works:
 
@@ -116,11 +114,11 @@ Downloads posts with media. Pick a mode based on what you want to do:
 | **Force re-download** | `b00p download --blog username --force` | Reprocess every post. Existing non-empty media files are still skipped by the integrity check; state is ignored. |
 | **Single post** | `b00p download --url "https://boosty.to/username/posts/id"` | Download one post by URL. Ignores state. |
 | **Smart sync** | `b00p download --blog username --sync` | Fetch the post list, diff against `_state.json` and disk, show the diff, ask `Apply changes? [y/N]`. Detects NEW, UNLOCKED, UPDATED, COMMENTS, VIDEO_MISMATCH, FILES_MISSING, LOCKED, LOCKED_NEW. |
-| **Sync headless** | `b00p download --blog username --sync --yes` | Same as sync but skip the prompt. **Required** for cron, `nohup`, Windows Task Scheduler, SSH-without-TTY, systemd — without `--yes` the prompt reads stdin which immediately returns EOF in headless contexts, b00p logs `warning: failed to read confirmation: EOF` followed by `Cancelled.`, and nothing is applied. |
+| **Sync headless** | `b00p download --blog username --sync --yes` | Same as sync but skip the prompt. **Required** for cron / Task Scheduler / any run without a terminal — see [Troubleshooting](#troubleshooting). |
 
 #### Examples
 
-Content flags (`--md`, `--comments`, `--download-external`, `--format`) combine with any download mode above; the sync-only and mode-exclusive flags have restrictions — see the blockquote after the examples:
+Content flags (`--md`, `--comments`, `--download-external`, `--format`) combine with any download mode above. `--check-media`, `--check-files`, and `--yes` require `--sync`; `--force` and `--url` reject the sync flags — b00p tells you exactly what's incompatible if you mix them.
 
 ```bash
 # Save markdown and comments alongside post.json
@@ -144,12 +142,6 @@ b00p download --blog username --sync --check-media
 # Sync + verify on-disk artefacts match what state says was written (no network)
 b00p download --blog username --sync --check-files
 ```
-
-> `--check-media`, `--check-files`, and `--yes` are sync-only. Passing them without `--sync` is a hard error (`requires --sync: [...]`).
->
-> `--force` is rejected together with `--sync` (sync already detects what needs updating). Use `--force` only without `--sync`.
->
-> `--url` is single-post: combine it only with `--md`, `--comments`, `--download-external`, `--format`. Passing `--sync`, `--check-media`, `--check-files`, `--yes`, `--force`, or an explicit `--workers` (even `--workers 1`) is a hard error (`--url is single-post and cannot be combined with: [...]`).
 
 #### Sync output
 
@@ -182,14 +174,12 @@ Apply changes? [y/N]
 - **LOCKED_NEW** — brand-new post you don't have access to. Counted in the summary but not downloaded or written to state.
 - **UNLOCKED** — was locked, now accessible (subscription upgraded). Triggers full re-download.
 - **UPDATED** — author edited the post (`updatedAt` changed).
-- **COMMENTS** — comment-count drift. For posts with `hasComments=true`, the on-disk count (top-level + inlined replies in `comments.json`) is compared to the API count, with disk reality winning over the cached state count. If `comments.json` is missing or unreadable, any non-zero API count triggers a refetch. For posts with `hasComments=false`, the legacy state-vs-API count comparison applies — when the API count differs from what state recorded at last save, sync fires `COMMENTS` and writes `comments.json` (after which `hasComments` flips to `true` and subsequent runs use the disk-count comparison). Posts flagged `commentsCapped` (see [State Tracking](#state-tracking)) suppress the disk<API mismatch trigger; the disk>API direction (deletions) still fires and clears the flag.
-- **VIDEO_MISMATCH** — native `ok_video` discrepancy: local file is missing, the HEAD request returns non-200, or `Content-Length` differs from the local file size. Transient HEAD errors are logged and skipped. Only native videos are validated — external videos and audio/file attachments are not. Requires `--check-media`.
-- **FILES_MISSING** — expected files absent on disk. `post.json` is always required; `comments.json` and `post.md` are required only when state says they were previously written. The apply phase re-fetches and rewrites whatever the check flagged; it doesn't just report. Inaccessible (locked) posts are skipped — they can't be re-fetched while locked, so flagging them would only produce a guaranteed-failing apply. Requires `--check-files`.
-- **LOCKED** — was accessible, now locked. On-disk data is preserved; only state's `locked` flag is flipped.
+- **COMMENTS** — the comment count changed since last download; `comments.json` is re-fetched. (Posts with 100+ comments are a special case — see [Troubleshooting](#some-posts-always-show-fewer-comments-than-boosty).)
+- **VIDEO_MISMATCH** — a native video's size on disk doesn't match the server. Only native videos are checked. Requires `--check-media`.
+- **FILES_MISSING** — expected files are missing on disk and get re-fetched. Requires `--check-files`.
+- **LOCKED** — was accessible, now locked (subscription downgraded). On-disk data is kept; the post is just marked locked.
 
-Posts with no actionable change are not labelled per-post; they only show up as `N no changes` in the summary count (inaccessible LOCKED_NEW posts appear under `N locked (no access)` instead, never in both lines). Note the per-flag lines (updated / comments / mismatch / missing) can each count the same multi-label post, so those lines may sum to more than the post total.
-
-Multiple labels can apply to the same post — they appear in one bracket joined by commas, e.g. `[UPDATED,VIDEO_MISMATCH]`.
+Posts with nothing to do show up only as `N no changes` in the summary. Multiple labels can apply to one post — they appear in one bracket, e.g. `[UPDATED,VIDEO_MISMATCH]`.
 
 ## Flags
 
@@ -213,7 +203,7 @@ Global flags (apply to every command):
 | `--download-external` | `false` | Download external videos via yt-dlp (best-effort; failures are logged, not retried) |
 | `--force` | `false` | Ignore state and reprocess. Rejected together with `--sync`. Integrity check still skips existing non-empty media. |
 | `--sync` | `false` | Smart sync with diff and confirmation |
-| `--yes` | `false` | With `--sync`: skip the interactive `Apply changes? [y/N]` prompt. **Required for headless runs** (cron, `nohup`, Windows Task Scheduler, SSH-without-TTY) — without `--yes` the prompt sees stdin EOF, logs a warning, and silently cancels the sync. Without `--sync`: hard error. |
+| `--yes` | `false` | With `--sync`: skip the `Apply changes? [y/N]` prompt — required for cron/headless runs, see [Troubleshooting](#troubleshooting). Without `--sync`: hard error. |
 | `--check-media` | `false` | With `--sync`: validate native video sizes via HEAD. Without `--sync`: hard error. |
 | `--check-files` | `false` | With `--sync`: verify expected files exist on disk. Without `--sync`: hard error. |
 | `--format` | `{date}_{title}` | Post directory name format |
@@ -231,7 +221,7 @@ Variables for `--format`:
 | `{date:d.m.y}` | `13.03.2026` | y=year, m=month, d=day |
 | `{id}` | `e24c0343-...` | Post UUID |
 
-`{title}` is sanitized for Windows/POSIX filesystems: strips `\ / : * ? " < > |`, collapses whitespace, caps at 80 runes. The fully-formatted directory name is then trimmed of leading/trailing dots and spaces (so `..` and `.hidden` are normalized), and the post ID is substituted whenever the result is empty or matches a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`, `LPT1..9`, case-insensitive — including extensions like `CON.txt`). Formatted-name collisions are resolved by appending the first 8 characters of the post ID.
+`{title}` is sanitized to be safe on Windows and POSIX filesystems: unsafe characters stripped, whitespace collapsed, length capped at 80 characters; names that end up empty or reserved on Windows (`CON`, `NUL`, ...) are replaced by the post ID. Name collisions are resolved by appending the first 8 characters of the post ID.
 
 ## Output Structure
 
@@ -260,35 +250,16 @@ Content block types b00p doesn't support yet (e.g. polls) are skipped with a per
 
 ## State Tracking
 
-`_state.json` per blog directory tracks downloaded posts. Each entry stores:
+Each blog directory has a `_state.json` that records what's already downloaded, so repeat runs only fetch what's new. Don't hand-edit it; deleting it forces a full re-download (existing files are still skipped by the integrity check, so it's cheap). Sync checks the actual files on disk, not just this cache, so stale or partially-written files heal on the next run without any repair flag.
 
-- `title`, `dirName` — post metadata
-- `downloadedAt` — when b00p fetched this post (set at save time)
-- `updatedAt` — when the author last edited the post (from the Boosty API; `0` for legacy entries written before the field was tracked, auto-backfilled on the next sync)
-- `commentsCount` — what the API claimed at last save
-- `hasComments`, `hasMd` — which artefacts were written on save (sync uses these to decide what files are expected on disk)
-- `commentsCapped` — the last comment fetch hit Boosty's structural ceiling (>100 top-level threads, or any thread with more inline replies than `reply_limit=100` allows). Sync suppresses re-trigger on the disk-vs-API mismatch for capped posts so they don't fire `COMMENTS` on every run. A subsequent successful uncapped refetch clears the flag.
-- `price`, `tier`, `locked` — access and pricing info
-
-The state file itself records `version` (schema version; files written before the field existed load fine and are stamped on the next save — a file from a *newer* b00p is rejected instead of silently dropping its fields), `lastSync`, and the post map. Writes are atomic (temp + fsync + rename) — see the **Atomic writes** bullet under [Reliability](#reliability) for the exact guarantees.
-
-Sync prefers disk reality over cached counts: for posts with `hasComments=true`, the next sync recomputes `len(top-level) + Σ len(replies.data)` from `comments.json` and refetches when that disagrees with the API. This auto-heals stale on-disk artefacts (e.g. posts whose replies were dropped before `reply_limit` was set on the comments endpoint) without a one-shot repair flag.
-
-Locked posts are not stored — after upgrading your subscription they are downloaded automatically. Downgraded posts keep their data on disk and are marked `locked: true`.
+Locked posts aren't stored — upgrade your subscription and the next run downloads them. Downgrade, and b00p keeps the files you already have.
 
 ## Reliability
 
-- **Retry with backoff**: API GETs retry 3× (5s / 15s / 30s) on transient request-side errors (transport failures — including a connection dropped mid-response — 5xx, 429, and any of those during a token refresh) — other 4xx responses, malformed JSON, and a token refresh the server *rejected* with 4xx (dead refresh token: retrying a deterministic verdict only delays the actionable error) all fail fast. Media downloads retry 3× on transient errors (network failures, 5xx, 429, 416-after-resume, create/write/close errors); deterministic 4xx download statuses (400/403/404/410 — expired signed URL, deleted media) fail fast, and for 400/403/410 the error includes a hint that the signed CDN URL likely expired or IP-bound — rerun sync to refresh. HEAD checks for `--check-media` are not retried (transient HEAD failure logs a warning, the per-post check is skipped, no `VIDEO_MISMATCH` is raised on transport errors). yt-dlp is bounded by a 20-minute timeout per external video; a timeout reports `timed out after 20m0s` and the post still saves.
-- **Idle-read watchdog**: long media downloads carry an idle-byte watchdog. If the server stops sending bytes for 60 seconds (wedged TCP connection that never RST/FINs), the request is cancelled with cause `idle timeout: no response body bytes for 60s` and the normal retry loop applies. Slow-but-live streams keep going forever.
-- **HTTP Range resume**: partial `.tmp` files from prior retries are reused via `Range: bytes=N-`. A `.tmp.url` sidecar pins the URL the partial was downloaded against; on signed-URL refresh between attempts (or between runs), the sidecar mismatch drops the stale partial and starts fresh.
-- **Atomic writes**: `_state.json`, `post.json`, `post.md`, `comments.json`, and `auth.json` (after refresh) are written via temp file + fsync + rename. Media downloads use temp file + rename (no fsync, to avoid stalling multi-GB writes) — a SIGKILL or crash mid-download leaves a `.tmp` plus `.tmp.url` orphan that the next attempt resumes from (if the URL still matches) or discards (if it doesn't). The parent directory is not fsynced, so power loss is not strongly defended against.
-- **Integrity check**: existing non-empty files are skipped; 0-byte partials are removed and re-downloaded.
-- **Incremental state saves**: state is written after each post, so interrupted runs resume cleanly.
-- **Comments endpoint quirks**: the server silently drops replies unless `reply_limit` is set, and `offset>0` returns `data=[]` with `isLast=true`. b00p sends `reply_limit=100` and fetches comments with `limit=101` — one probe slot beyond the 100 we expect to keep, so posts with exactly 100 top-level threads can be distinguished from posts that hit the cap. Posts that genuinely exceed 100 top-level threads, or any thread with >100 replies, are flagged `commentsCapped` in state and sync suppresses the catch-up re-trigger that would otherwise fire forever — see [State Tracking](#state-tracking). New top-level threads on capped posts are not auto-detected; an edit (`UPDATED` label) re-fetches comments, or you can force a refetch for a specific post by deleting its `comments.json` and re-running a plain `--sync` — the missing file triggers `[COMMENTS]` directly, no extra flag needed (with `--check-files` it is additionally flagged `[FILES_MISSING]`).
-- **Sync workers**: `--workers N` parallelises the sync apply phase too (not just `--check-media`). State writes are serialised under a mutex so concurrent updates do not race.
-- **One instance per blog directory**: that mutex is in-process — two b00p processes on the same blog directory at once (e.g. a manual run overlapping a cron sync) can overwrite each other's `_state.json` entries (last writer wins). Nothing gets corrupted (writes stay atomic) and a lost entry self-heals on the next sync — the post re-classifies as NEW and existing files are skipped — but don't overlap runs deliberately; use `--workers` for parallelism inside one run.
-- **Spinner**: animated progress with file size during downloads (`  ⠹ video_001.mp4  45.2 MB / 1.2 GB  (3.7%)`).
-- **Clear errors**: expired tokens print instructions to update `auth.json`; download failures include the response body snippet and a hint when the status code looks like signed-URL expiry (400/403/410).
+- **Interrupted runs resume cleanly.** State is saved after each post and partial downloads pick up where they left off, so a killed or crashed run loses nothing — just re-run it. Existing complete files are skipped; empty partials are re-downloaded.
+- **Crashes never corrupt your data.** Every file is written atomically, so you can't end up with a half-written `post.json` or `_state.json`.
+- **Transient errors retry automatically** (network blips, 5xx, rate limits); permanent ones (expired links, deleted media, dead tokens) fail fast with a hint about the cause instead of hammering the server.
+- **Don't run two b00p processes on the same blog at once** (e.g. a manual run overlapping a cron sync) — they can clobber each other's state. Nothing corrupts and it self-heals next run, but use `--workers N` for parallelism within a single run instead.
 
 ## External Videos
 
@@ -299,7 +270,7 @@ pip install yt-dlp
 b00p download --blog username --download-external
 ```
 
-If b00p logs `yt-dlp not found in PATH`, yt-dlp isn't installed or isn't on your shell's `PATH`. Verify with `yt-dlp --version`; on Windows, pip-installed binaries land in `%APPDATA%\Python\Python3xx\Scripts` (add that to `PATH`) or you can invoke it as `py -m yt_dlp`. See [Troubleshooting](#troubleshooting) for more.
+If b00p logs `yt-dlp not found in PATH`, see [Troubleshooting](#yt-dlp-not-found-in-path).
 
 ## Troubleshooting
 
@@ -314,45 +285,43 @@ Your tokens are missing, expired, or the refresh attempt was rejected. Re-extrac
 
 ### `API ... returned 401`
 
-Same fix as the token errors above — the current access token has been revoked or expired and the refresh token couldn't recover it. The log line includes the failing URL between `API` and `returned`, so `API https://api.boosty.to/v1/blog/.../post/? returned 401: ...`.
+Same fix as the token errors above — the access token expired and the refresh token couldn't recover it. The log line names the failing URL.
 
 ### `API ... returned 403` / post shows up `[LOCKED]`
 
-You don't have the required subscription tier for that post. Not a b00p error. If you upgrade later, the next `--sync` picks it up automatically (it'll show as `[UNLOCKED]`).
+You don't have the required subscription tier for that post. Not a b00p error. If you upgrade later, the next `--sync` picks it up automatically (shown as `[UNLOCKED]`).
 
 ### `API ... returned 404`
 
-The post or blog no longer exists (deleted, or the blog was renamed). A 404 on the **blog post list** (renamed/deleted blog) aborts the whole run with `fetch posts: ... returned 404` — fix your `--blog`. A 404 on a **single post** during sync counts it as a failed post, so the run exits non-zero. Either way b00p does not delete anything: stale directories and `_state.json` entries stay on disk until you remove them manually.
+The post or blog no longer exists (deleted or renamed). Check your `--blog`. b00p never deletes anything on its own — stale directories and state entries stay until you remove them.
 
 ### `yt-dlp not found in PATH`
 
-You passed `--download-external` but yt-dlp isn't installed or isn't on `PATH`. Install it (`pip install yt-dlp`) and verify with `yt-dlp --version`. On Windows, ensure the Python `Scripts` directory is on `PATH` or use `py -m yt_dlp`. yt-dlp failures on individual videos are logged and the post still saves — only the missing binary blocks the feature entirely.
+You passed `--download-external` but yt-dlp isn't installed or on `PATH`. Install it with `pip install yt-dlp` and check `yt-dlp --version`. On Windows, add the Python `Scripts` directory to `PATH` or run it as `py -m yt_dlp`.
 
-### `--sync` cancels immediately in cron / systemd (or blocks on an idle interactive TTY)
+### `--sync` does nothing in cron / systemd
 
-In headless runs (cron, `nohup`, Windows Task Scheduler, SSH-without-TTY, systemd) stdin is closed, so `Apply changes? [y/N]` reads EOF immediately, b00p logs `warning: failed to read confirmation: EOF` followed by `Cancelled.`, and nothing is applied. On a live interactive TTY where no one types anything, the prompt blocks until you do. Either way add `--yes` to apply automatically:
+In a headless run (cron, Task Scheduler, SSH without a terminal) there's no one to answer the `Apply changes? [y/N]` prompt, so b00p cancels without applying. Add `--yes` to apply automatically:
 
 ```bash
 b00p download --blog username --sync --yes
 ```
 
-The log line `Auto-applying (--yes).` makes the choice explicit so headless logs still show the decision.
+### Some posts always show fewer comments than Boosty
 
-### Disk and API counts don't match after a long run
-
-Posts with more than 100 top-level comments (or any single thread with more than 100 replies) hit the Boosty API's `offset=` quirk — the server returns an empty page even when more comments exist, capping retrieval. b00p detects this on save and sets `commentsCapped: true` in `_state.json` so the catch-up sync no longer re-fires `[COMMENTS]` on every run for that post (it would never close). New top-level threads on capped posts are not auto-detected; if the author edits such a post the `[UPDATED]` path re-fetches comments anyway, or you can force a refetch for a specific post by deleting its `comments.json` — the next plain `--sync` detects the missing file and re-fires `[COMMENTS]`, no extra flag needed. Deletions are still detected (disk > API triggers refetch). Everything below the 100-thread / 100-replies-per-thread limit syncs cleanly.
+Posts with 100+ comments can't be fully fetched — that's a hard limit in Boosty's API, not a b00p bug. b00p archives what it can and stops nagging about the rest. To force a refetch of one such post, delete its `comments.json` and re-run `--sync`.
 
 ### Download fails with `status 403`/`400`/`410` and "signed URL likely expired"
 
-okcdn (the CDN serving Boosty's native videos) issues signed URLs that bind to your IP and expire after a short window. On a long worker queue, late-queued downloads can hit dead URLs. b00p surfaces the response body snippet and adds the hint when the status looks like signed-URL expiry. Re-running the sync re-fetches the per-post payload, which contains fresh URLs. If you see this repeatedly, lower `--workers` so each post finishes before its URLs expire.
+Boosty's video links expire and are tied to your IP, so long download queues can hit dead ones. Just re-run the sync — it fetches fresh links. If it keeps happening, lower `--workers` so each post finishes before its links expire.
 
 ### `yt-dlp timed out after 20m0s`
 
-A single external video download exceeded the 20-minute per-invocation budget. Usually a wedged ffmpeg muxer or a slow third-party CDN. The post still saves; the external video is logged as a failure and the next `--sync` doesn't retry external videos automatically (they're best-effort). If a specific URL chronically times out, fetch it manually with `yt-dlp <url>` outside b00p.
+An external video took longer than the 20-minute limit. The post still saves without it. If one URL keeps timing out, grab it manually with `yt-dlp <url>`.
 
 ### `failed to save state: ... Access is denied` on Windows
 
-Windows Defender or the Search Indexer can briefly hold a handle on freshly-written files during anti-malware scan, causing the atomic rename to fail with a sharing violation. The error is logged but data isn't lost — because state didn't advance, the next sync treats the affected post as `[NEW]` (it's missing from `_state.json`) and re-writes everything. If this happens often, exclude the output directory from Defender real-time scanning.
+Windows Defender briefly locked a file mid-write. No data is lost (the post just re-downloads next run). If it happens often, exclude the output directory from Defender's real-time scanning.
 
 ## Library Usage
 
@@ -406,7 +375,7 @@ func main() {
 }
 ```
 
-`FetchComments(blog, postID, limit)` yields top-level comments (replies are inlined per item, up to `reply_limit=100`), but unlike `FetchPosts` it returns a **single page**: the Boosty comments endpoint ignores `offset>0`, so pagination is impossible — size `limit` to cover every top-level thread you expect (the CLI uses 101 with cap detection; see the comments quirks under [Reliability](#reliability)).
+`FetchComments(blog, postID, limit)` yields top-level comments (replies are inlined per item, up to `reply_limit=100`), but unlike `FetchPosts` it returns a **single page**: the Boosty comments endpoint ignores `offset>0`, so pagination is impossible — size `limit` to cover every top-level thread you expect.
 
 For arbitrary endpoints not covered by a typed iterator, use `client.GetJSON(url, &out)` directly — `boosty.PostURL`, `boosty.PostsURL`, `boosty.CommentsURL`, and friends build the URLs.
 
@@ -428,7 +397,7 @@ go vet ./...
 go test ./... -race
 ```
 
-CI runs `go vet`, `go test -race`, [`staticcheck`](https://staticcheck.dev/), and [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) on Linux, plus `go vet` and `go test -race` on Windows (NTFS case folding, reserved names, and rename semantics are load-bearing there), on every push and pull request against `master`.
+CI runs the test suite on Linux and Windows on every push and pull request.
 
 ## License
 

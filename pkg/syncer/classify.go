@@ -32,13 +32,16 @@ type syncItem struct {
 	Edited            bool // updatedAt changed
 	NewComments       bool // disk-side count differs from post.Count.Comments
 	BackfillUpdatedAt bool // existing.UpdatedAt was 0; needs persisting
+	DirNameMissing    bool // state entry had no DirName; discarded, post re-classified as IsNew
 
-	// DiskCommentCount is the count of top-level comments + their inlined replies
-	// read from comments.json. Populated in classifyPost for posts in state with
-	// HasComments=true. -1 means the file was missing, unreadable, or corrupt;
-	// any non-negative value is directly comparable to post.Count.Comments. Used
-	// instead of Existing.CommentsCount as the trigger source so legacy state
-	// entries that cached an inflated API count cannot mask on-disk gaps.
+	// DiskCommentCount is the count of live top-level comments + their inlined
+	// live replies read from comments.json (isDeleted stubs excluded, matching
+	// what post.Count.Comments measures). Populated in classifyPost for posts in
+	// state with HasComments=true. -1 means the file was missing, unreadable, or
+	// corrupt; any non-negative value is directly comparable to
+	// post.Count.Comments. Used instead of Existing.CommentsCount as the trigger
+	// source so legacy state entries that cached an inflated API count cannot
+	// mask on-disk gaps.
 	DiskCommentCount int
 
 	VideoMismatch string       // detail string (empty = no mismatch)
@@ -84,6 +87,9 @@ func (s syncItem) Labels() []string {
 // Detail aggregates per-flag detail strings for display.
 func (s syncItem) Detail() string {
 	var parts []string
+	if s.DirNameMissing {
+		parts = append(parts, "state entry had no directory name; re-downloading")
+	}
 	if s.JustLocked {
 		parts = append(parts, "was accessible, now locked")
 	}
@@ -131,6 +137,17 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 	existing, inState := st.Get(post.ID)
 
 	item := syncItem{Post: post, DiskCommentCount: -1}
+
+	// filepath.Join(blogDir, "") is blogDir, so an entry with no DirName aims
+	// classify at the blog root's comments.json and apply at the blog root
+	// itself. saveNewPost guards the write side; this closes the read side for
+	// entries left by builds predating it. Dropping the entry re-downloads the
+	// post into a real directory and overwrites the bad entry.
+	if inState && existing.DirName == "" {
+		inState = false
+		existing = state.PostEntry{}
+		item.DirNameMissing = true
+	}
 
 	if !inState {
 		// DirName stays empty for out-of-state posts: nothing reads it —
@@ -188,8 +205,9 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 	// comparison — preserves prior behavior for that case.
 	//
 	// CommentsCapped suppresses re-trigger when the prior save hit Boosty's
-	// structural ceiling (>100 top-level threads, or any thread with >100
-	// replies) — disk count can never catch up to API count, so a literal
+	// structural ceiling (>100 top-level items in the single page the endpoint
+	// serves, or a thread whose live replies were not all inlined within
+	// reply_limit) — disk count can never catch up to API count, so a literal
 	// "n != post.Count.Comments" would fire on every sync forever.
 	//
 	// Suppression is one-directional: only when disk < API (the unreachable-
@@ -231,11 +249,17 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 }
 
 // diskCommentCount returns the on-disk equivalent of post.Count.Comments —
-// top-level comments plus the replies that the API actually inlined into each
-// of them. Returns ok=false when the file is missing, unreadable, or fails to
-// parse; the caller treats that as a reason to refetch when the post has any
-// comments at all. We only count len(c.Replies.Data) (not c.ReplyCount), since
-// disk reflects what was stored, not what the server claims exists.
+// the liveCommentCount of comments.json. Returns ok=false when the file is
+// missing, unreadable, or fails to parse; the caller treats that as a reason
+// to refetch when the post has any comments at all.
+//
+// Files written by builds that predate the IsDeleted field carry unmarked
+// stubs, which count as live here. The inflated count triggers a refetch as
+// soon as it disagrees with the API count, and the rewrite adds the markers —
+// but while the two coincidentally match (K unmarked stubs offsetting K new
+// live comments), the gap goes undetected until the counts drift. Same blind
+// spot the old raw comparison had; closing it would mean refetching every
+// legacy post unconditionally.
 func diskCommentCount(dir string) (int, bool) {
 	data, err := os.ReadFile(filepath.Join(dir, "comments.json"))
 	if err != nil {
@@ -245,11 +269,45 @@ func diskCommentCount(dir string) (int, bool) {
 	if err := json.Unmarshal(data, &comments); err != nil {
 		return 0, false
 	}
-	n := len(comments)
+	n, _ := liveCommentCount(comments)
+	return n, true
+}
+
+// liveCommentCount counts the live (non-deleted) comments in a fetched or
+// stored comment list — live top-level comments plus the live replies
+// actually inlined into each thread — and reports whether any thread inlined
+// fewer live replies than its ReplyCount claims exist (reply truncation:
+// the server holds live replies the page didn't include; a nil replies
+// object with ReplyCount > 0 counts as truncation too, fail-closed).
+//
+// Deleted comments come back as IsDeleted stubs (they hold thread structure —
+// a deleted parent keeps its live replies attached) and are excluded from
+// both numbers: post.Count.Comments and per-thread ReplyCount are live-only,
+// so counting stubs would hold disk permanently above API for any post that
+// ever had a comment deleted, refiring COMMENTS on every sync with no path
+// to closure. We count the live subset of c.Replies.Data (not c.ReplyCount),
+// since disk reflects what was stored, not what the server claims exists.
+//
+// Shared by diskCommentCount (classify, read side) and downloadComments
+// (save, write side) so the counting contract cannot drift between what
+// sync writes and what it later reads back.
+func liveCommentCount(comments []boosty.Comment) (live int, replyTruncated bool) {
 	for _, c := range comments {
+		if !c.IsDeleted {
+			live++
+		}
+		liveReplies := 0
 		if c.Replies != nil {
-			n += len(c.Replies.Data)
+			for _, r := range c.Replies.Data {
+				if !r.IsDeleted {
+					liveReplies++
+				}
+			}
+		}
+		live += liveReplies
+		if liveReplies < c.ReplyCount {
+			replyTruncated = true
 		}
 	}
-	return n, true
+	return live, replyTruncated
 }
