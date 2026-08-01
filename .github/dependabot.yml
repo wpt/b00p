@@ -1,0 +1,8 @@
+# Keep workflow actions current — Node 20 actions stop running on GitHub
+# runners after 2026-09-16, so stale pins here break CI and releases silently.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
