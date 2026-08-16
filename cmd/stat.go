@@ -32,8 +32,9 @@ func init() {
 func runStat(cmd *cobra.Command, args []string) error {
 	// Same slug contract as download's --blog: boosty.PostsURL interpolates the
 	// name into the API path, so '/' or '?' would silently rewrite the endpoint.
-	if !blogNameRe.MatchString(statBlog) {
-		return fmt.Errorf("invalid --blog %q: must match %s", statBlog, blogNameRe)
+	statBlog = strings.TrimSpace(statBlog)
+	if err := validateBlogName(statBlog); err != nil {
+		return fmt.Errorf("invalid --blog %q: %v", statBlog, err)
 	}
 
 	c, err := newClient()
