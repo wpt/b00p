@@ -23,8 +23,8 @@ func TestValidateBlogName(t *testing.T) {
 		{"single_char", "a", true},
 		{"length_64", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
 
-		// Dots: Boosty allows them mid-name (issue #1, boosty.to/art.duende).
-		{"dotted", "art.duende", true},
+		// Dots: Boosty allows them mid-name (issue #1).
+		{"dotted", "bbb.sss", true},
 		{"multi_dot", "a.b.c", true},
 
 		// Path traversal — primary attack we are blocking.
@@ -90,8 +90,8 @@ func TestBoostyURLRe(t *testing.T) {
 		},
 		{
 			name:     "dotted_blog",
-			url:      "https://boosty.to/art.duende/posts/abc-123",
-			wantBlog: "art.duende", wantID: "abc-123", wantOK: true,
+			url:      "https://boosty.to/bbb.sss/posts/abc-123",
+			wantBlog: "bbb.sss", wantID: "abc-123", wantOK: true,
 		},
 		// Bad dot placement is captured on purpose and rejected later by
 		// validateBlogName, so the user gets the precise reason.

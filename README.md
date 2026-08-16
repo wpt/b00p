@@ -216,7 +216,7 @@ Global flags (apply to every command):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--blog` | — | Blog username, as in `boosty.to/<username>` (mutually exclusive with `--url`). Letters, digits, `_`, `-`, and dots between them (`art.duende`); up to 64 characters. |
+| `--blog` | — | Blog username, as in `boosty.to/<username>` (mutually exclusive with `--url`). Letters, digits, `_`, `-`, and dots between them (`bbb.sss`); up to 64 characters. |
 | `--url` | — | Full post URL for single-post download (mutually exclusive with `--blog`; rejects the sync flags, `--force` and `--workers` — see note above the table) |
 | `--md` | `false` | Generate `post.md` with frontmatter (price/tier included). Not retroactive — use `--force` to backfill an existing archive |
 | `--comments` | `false` | Download `comments.json`. Not retroactive — use `--force` to backfill an existing archive |
