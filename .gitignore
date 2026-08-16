@@ -3,6 +3,8 @@ auth.json.bak
 auth.json.tmp-*
 output/
 
+docs/
+
 # binaries
 b00p
 b00p_*

@@ -50,22 +50,42 @@ func init() {
 	rootCmd.AddCommand(downloadCmd)
 }
 
-// blogSlugPattern limits a blog slug to safe path characters. Boosty
-// usernames are alphanumeric + hyphen + underscore in practice; the charset
-// blocks "..", "CON", and any FS-significant character before the slug
-// reaches filepath.Join — without it a hostile post URL could redirect
-// output into a parent directory. Both regexes below embed it so the --blog
-// validation and the --url capture group cannot drift apart.
-const blogSlugPattern = `[A-Za-z0-9_-]{1,64}`
+// blogSlugChars is the --url capture charset. It deliberately admits shapes
+// validateBlogName rejects ("..", "alice.") so the user sees the precise
+// reason, not a generic "invalid boosty URL" — every capture MUST be validated.
+const blogSlugChars = `[A-Za-z0-9._-]{1,64}`
+
+// maxBlogNameLen caps the slug below FS component limits (ASCII, bytes == runes).
+const maxBlogNameLen = 64
 
 var (
 	// boostyURLRe is anchored at the start so the host is the real host —
 	// unanchored, any string CONTAINING "boosty.to/x/posts/y" matched too
 	// (evilboosty.to, boosty.to inside another URL's query/fragment) and the
 	// run proceeded to a confusing API 404 instead of a clean rejection.
-	boostyURLRe = regexp.MustCompile(`^(?:https?://)?(?:www\.|m\.)?boosty\.to/(` + blogSlugPattern + `)/posts/([A-Za-z0-9_-]+)(?:/)?(?:[?#].*)?$`)
-	blogNameRe  = regexp.MustCompile(`^` + blogSlugPattern + `$`)
+	boostyURLRe = regexp.MustCompile(`^(?:https?://)?(?:www\.|m\.)?boosty\.to/(` + blogSlugChars + `)/posts/([A-Za-z0-9_-]+)(?:/)?(?:[?#].*)?$`)
+
+	// blogStructRe allows dots only between runs of safe characters: ".",
+	// "..", ".hidden", "alice." can never validate — the slug lands in
+	// filepath.Join, where those traverse or trip the Windows trailing-dot strip.
+	blogStructRe = regexp.MustCompile(`^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$`)
 )
+
+// validateBlogName is the single slug contract for --blog and the --url
+// capture. Windows reserved device names (con, nul) are deliberately NOT
+// rejected: modern Windows creates them fine and a reject would block a real
+// blog on every platform. Errors are bare reasons; callers prefix context.
+func validateBlogName(name string) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("empty")
+	case len(name) > maxBlogNameLen:
+		return fmt.Errorf("longer than %d characters", maxBlogNameLen)
+	case !blogStructRe.MatchString(name):
+		return fmt.Errorf("allowed: ASCII letters, digits, '_', '-', and '.' between them")
+	}
+	return nil
+}
 
 func newClient() (*boosty.Client, error) {
 	if authPath == "" {
@@ -100,19 +120,22 @@ func buildConfig(blog string) syncer.Config {
 }
 
 func runDownload(cmd *cobra.Command, args []string) error {
-	// URLs pasted from chat/docs into a quoted arg routinely carry edge
+	// Values pasted from chat/docs into a quoted arg routinely carry edge
 	// whitespace. A leading space would fail the anchored regex with a
 	// rejection message where the space is invisible; a trailing space
 	// would ride into the post-id capture and produce a confusing API 404.
 	postURL = strings.TrimSpace(postURL)
+	blogName = strings.TrimSpace(blogName)
 	if blogName == "" && postURL == "" {
 		return fmt.Errorf("specify --blog or --url")
 	}
 	if blogName != "" && postURL != "" {
 		return fmt.Errorf("--blog and --url are mutually exclusive")
 	}
-	if blogName != "" && !blogNameRe.MatchString(blogName) {
-		return fmt.Errorf("invalid --blog %q: must match %s", blogName, blogNameRe)
+	if blogName != "" {
+		if err := validateBlogName(blogName); err != nil {
+			return fmt.Errorf("invalid --blog %q: %v", blogName, err)
+		}
 	}
 	if outputDir == "" {
 		return fmt.Errorf("--output cannot be empty")
@@ -166,23 +189,28 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--force is only honored without --sync; sync already detects what needs updating")
 	}
 
+	// Parse and validate the URL before touching auth so a bad URL fails fast.
+	var urlBlog, urlPostID string
+	if postURL != "" {
+		matches := boostyURLRe.FindStringSubmatch(postURL)
+		if matches == nil {
+			return fmt.Errorf("invalid boosty URL: %s (expected https://boosty.to/{blog}/posts/{post-id})", postURL)
+		}
+		urlBlog, urlPostID = matches[1], matches[2]
+		// Sole guard between the loose capture ("..") and filepath.Join.
+		if err := validateBlogName(urlBlog); err != nil {
+			return fmt.Errorf("invalid blog %q in --url: %v", urlBlog, err)
+		}
+	}
+
 	c, err := newClient()
 	if err != nil {
 		return err
 	}
 
 	if postURL != "" {
-		matches := boostyURLRe.FindStringSubmatch(postURL)
-		if matches == nil {
-			return fmt.Errorf("invalid boosty URL: %s (expected https://boosty.to/{blog}/posts/{post-id})", postURL)
-		}
-		// blog is safe for filepath.Join as-is: the boostyURLRe capture group
-		// is the same blogSlugPattern charset blogNameRe enforces for --blog.
-		blog := matches[1]
-		postID := matches[2]
-
 		var post boosty.Post
-		if err := c.GetJSON(boosty.PostURL(blog, postID), &post); err != nil {
+		if err := c.GetJSON(boosty.PostURL(urlBlog, urlPostID), &post); err != nil {
 			return fmt.Errorf("fetch post: %w", err)
 		}
 		// Stub guard: per-post endpoint may return a degraded payload (no
@@ -191,9 +219,9 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		// length post.md against a stub. Same guard as fetchFullPost and
 		// MaybeRefreshSignedURLs apply on the sync path.
 		if !post.HasAccess || len(post.Data) == 0 {
-			return fmt.Errorf("post %s not accessible (locked, deleted, or subscription lapsed)", postID)
+			return fmt.Errorf("post %s not accessible (locked, deleted, or subscription lapsed)", urlPostID)
 		}
-		_, _, err := syncer.New(c, buildConfig(blog)).SavePost(&post)
+		_, _, err := syncer.New(c, buildConfig(urlBlog)).SavePost(&post)
 		return err
 	}
 

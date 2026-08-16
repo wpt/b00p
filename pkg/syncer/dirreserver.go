@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/wpt/b00p/pkg/state"
 )
 
 // reserverKeySep separates the blog directory from the base name when forming
@@ -101,6 +103,12 @@ func (r *dirReserver) reserve(blogDir, postID, base string) string {
 // open a window where two workers could both observe "unowned + no file on
 // disk" and claim the same name.
 func (r *dirReserver) tryNameLocked(blogDir, postID, name string) (string, bool) {
+	// A dir named after a blog-root file b00p writes breaks it: index.md stops
+	// regenerating, a _state.json dir aborts every sync at state.Load. Refuse
+	// even before the file exists — post dirs are created before the first save.
+	if isBlogServiceName(name) {
+		return "", false
+	}
 	key := reservationKey(blogDir, name)
 	if owner, ok := r.owned[key]; ok {
 		if owner == postID {
@@ -133,6 +141,11 @@ func (r *dirReserver) tryNameLocked(blogDir, postID, name string) (string, bool)
 // created a directory called post.json, or symlinked it into a sensitive
 // path) without ever opening the file.
 func (r *dirReserver) diskOwnedBy(blogDir, name, postID string) bool {
+	// A stray file at blogDir/name would read as "free" (the post.json stat
+	// fails with ENOTDIR) and MkdirAll then fails every run — refuse, caller suffixes.
+	if info, err := os.Stat(filepath.Join(blogDir, name)); err == nil && !info.IsDir() {
+		return false
+	}
 	path := filepath.Join(blogDir, name, "post.json")
 	info, err := os.Stat(path)
 	if err != nil {
@@ -153,6 +166,15 @@ func (r *dirReserver) diskOwnedBy(blogDir, name, postID string) bool {
 		return true
 	}
 	return existing.ID == "" || existing.ID == postID
+}
+
+// isBlogServiceName reports whether name collides with a blog-root file b00p
+// writes (index.md, _state.json), folded like reservationKey on case-insensitive FS.
+func isBlogServiceName(name string) bool {
+	if caseFoldFS {
+		name = strings.ToLower(name)
+	}
+	return name == blogIndexName || name == state.FileName
 }
 
 // reservationKey forms the map key for a (blogDir, name) pair. Centralised so

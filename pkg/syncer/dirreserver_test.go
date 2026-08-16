@@ -270,3 +270,30 @@ func TestDirReserver_SuffixCollisionEscalatesToFullID(t *testing.T) {
 		t.Errorf("squatter lost its reservation: got %q, want 'shared_cccccccc'", again)
 	}
 }
+
+// b00p's own blog-root filenames must never become a post dir, even before
+// the files exist: an "index.md"/"_state.json" dir breaks index/state forever.
+func TestDirReserver_BlogServiceNamesGetSuffix(t *testing.T) {
+	dir := t.TempDir()
+	r := newDirReserver()
+
+	for _, base := range []string{"index.md", "_state.json"} {
+		if got := r.reserve(dir, "abcdef1234", base); got != base+"_abcdef12" {
+			t.Errorf("reserve(%q) = %q, want %q", base, got, base+"_abcdef12")
+		}
+	}
+}
+
+// A stray file at blogDir/name previously read as "free" and MkdirAll then
+// failed with ENOTDIR every run.
+func TestDirReserver_FileInTheWayGetsSuffix(t *testing.T) {
+	dir := t.TempDir()
+	r := newDirReserver()
+
+	if err := os.WriteFile(filepath.Join(dir, "notes"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.reserve(dir, "abcdef1234", "notes"); got != "notes_abcdef12" {
+		t.Errorf("reserve = %q, want 'notes_abcdef12'", got)
+	}
+}

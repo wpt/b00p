@@ -29,7 +29,7 @@ Rename it to `b00p` (or `b00p.exe` on Windows) and put it anywhere on your `PATH
 
 ### Build from source
 
-Requires **Go 1.26.5+**:
+Requires **Go 1.26.6+**:
 
 ```bash
 go install github.com/wpt/b00p@latest
@@ -216,7 +216,7 @@ Global flags (apply to every command):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--blog` | — | Blog username (mutually exclusive with `--url`) |
+| `--blog` | — | Blog username, as in `boosty.to/<username>` (mutually exclusive with `--url`). Letters, digits, `_`, `-`, and dots between them (`art.duende`); up to 64 characters. |
 | `--url` | — | Full post URL for single-post download (mutually exclusive with `--blog`; rejects the sync flags, `--force` and `--workers` — see note above the table) |
 | `--md` | `false` | Generate `post.md` with frontmatter (price/tier included). Not retroactive — use `--force` to backfill an existing archive |
 | `--comments` | `false` | Download `comments.json`. Not retroactive — use `--force` to backfill an existing archive |

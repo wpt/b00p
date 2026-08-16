@@ -1,11 +1,14 @@
 package cmd
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// blogNameRe protects filepath.Join from URL-derived blog slugs that contain
-// path traversal or separators. These tests pin the contract so future
+// validateBlogName protects filepath.Join from URL-derived blog slugs that
+// contain path traversal or separators. These tests pin the contract so future
 // refactors do not silently widen the accepted set.
-func TestBlogNameRe(t *testing.T) {
+func TestValidateBlogName(t *testing.T) {
 	cases := []struct {
 		name string
 		blog string
@@ -20,10 +23,24 @@ func TestBlogNameRe(t *testing.T) {
 		{"single_char", "a", true},
 		{"length_64", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
 
+		// Dots: Boosty allows them mid-name (issue #1, boosty.to/art.duende).
+		{"dotted", "art.duende", true},
+		{"multi_dot", "a.b.c", true},
+
 		// Path traversal — primary attack we are blocking.
 		{"dotdot", "..", false},
 		{"single_dot", ".", false},
 		{"traversal", "../etc", false},
+
+		// Dot placements that break Windows dirs or hide the dir on Unix.
+		{"leading_dot", ".hidden", false},
+		{"trailing_dot", "alice.", false},
+		{"double_dot_inside", "a..b", false},
+
+		// Reserved device names deliberately allowed (see validateBlogName);
+		// pinned so a future "safety" tightening does not re-block real blogs.
+		{"reserved_con_ok", "con", true},
+		{"reserved_con_dotted_ok", "con.duende", true},
 
 		// FS separators.
 		{"slash", "alice/bob", false},
@@ -48,8 +65,9 @@ func TestBlogNameRe(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := blogNameRe.MatchString(tc.blog); got != tc.want {
-				t.Errorf("blogNameRe.MatchString(%q) = %v, want %v", tc.blog, got, tc.want)
+			err := validateBlogName(tc.blog)
+			if got := err == nil; got != tc.want {
+				t.Errorf("validateBlogName(%q) = %v, want valid=%v", tc.blog, err, tc.want)
 			}
 		})
 	}
@@ -69,6 +87,18 @@ func TestBoostyURLRe(t *testing.T) {
 			name:     "plain",
 			url:      "https://boosty.to/alice/posts/abc-123",
 			wantBlog: "alice", wantID: "abc-123", wantOK: true,
+		},
+		{
+			name:     "dotted_blog",
+			url:      "https://boosty.to/art.duende/posts/abc-123",
+			wantBlog: "art.duende", wantID: "abc-123", wantOK: true,
+		},
+		// Bad dot placement is captured on purpose and rejected later by
+		// validateBlogName, so the user gets the precise reason.
+		{
+			name:     "trailing_dot_blog_captured",
+			url:      "https://boosty.to/alice./posts/abc-123",
+			wantBlog: "alice.", wantID: "abc-123", wantOK: true,
 		},
 		{
 			name:     "query_strips",
@@ -102,9 +132,11 @@ func TestBoostyURLRe(t *testing.T) {
 			name: "trailing_path_segment",
 			url:  "https://boosty.to/alice/posts/abc-123/extra",
 		},
+		// ".." fits the charset; validateBlogName is the guard (pinned below).
 		{
-			name: "unsafe_blog",
-			url:  "https://boosty.to/../posts/abc-123",
+			name:     "traversal_blog_captured",
+			url:      "https://boosty.to/../posts/abc-123",
+			wantBlog: "..", wantID: "abc-123", wantOK: true,
 		},
 		{
 			name: "unsafe_post_id",
@@ -159,5 +191,19 @@ func TestBoostyURLRe(t *testing.T) {
 					tc.url, m[1], m[2], tc.wantBlog, tc.wantID)
 			}
 		})
+	}
+}
+
+// The --url capture admits ".." and runDownload's validateBlogName call is
+// the only guard before filepath.Join — deleting or reordering it must fail here.
+func TestRunDownload_ValidatesURLBlog(t *testing.T) {
+	oldURL, oldBlog := postURL, blogName
+	t.Cleanup(func() { postURL, blogName = oldURL, oldBlog })
+	blogName = ""
+	postURL = "https://boosty.to/../posts/abc-123"
+
+	err := runDownload(downloadCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), `invalid blog ".."`) {
+		t.Fatalf("runDownload(--url with traversal blog) = %v, want invalid-blog rejection", err)
 	}
 }
