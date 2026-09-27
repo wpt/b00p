@@ -22,6 +22,8 @@ var rootCmd = &cobra.Command{
 	SilenceUsage:  true,
 }
 
+// Execute runs the root command and exits with status 1 on error, printing
+// the error once to stderr.
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

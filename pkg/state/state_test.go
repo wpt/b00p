@@ -97,6 +97,24 @@ func TestState_Count(t *testing.T) {
 	}
 }
 
+func TestState_DropEmptyDirNames(t *testing.T) {
+	s := &State{Posts: make(map[string]PostEntry)}
+	s.Add("good", PostEntry{Title: "G", DirName: "dir_g"})
+	s.Add("bad", PostEntry{Title: "B", DirName: ""})
+	s.Add("bad2", PostEntry{Title: "B2"})
+
+	dropped := s.DropEmptyDirNames()
+	if len(dropped) != 2 {
+		t.Fatalf("dropped = %v, want the two empty-DirName ids", dropped)
+	}
+	if !s.Has("good") || s.Has("bad") || s.Has("bad2") {
+		t.Errorf("after drop: good=%v bad=%v bad2=%v, want only good", s.Has("good"), s.Has("bad"), s.Has("bad2"))
+	}
+	if again := s.DropEmptyDirNames(); len(again) != 0 {
+		t.Errorf("second drop = %v, want nothing", again)
+	}
+}
+
 func TestState_SaveAndLoad(t *testing.T) {
 	dir := t.TempDir()
 

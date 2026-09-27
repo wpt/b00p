@@ -2,7 +2,9 @@ package syncer
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -24,7 +26,9 @@ func confirmApply(log boosty.Logger, in *bufio.Reader, auto bool) bool {
 	}
 	fmt.Fprint(os.Stderr, "Apply changes? [y/N] ")
 	answer, err := in.ReadString('\n')
-	if err != nil {
+	// A piped answer with no trailing newline (`printf y |`) arrives together
+	// with io.EOF; only an EOF with nothing read is a failed confirmation.
+	if err != nil && (!errors.Is(err, io.EOF) || answer == "") {
 		log.Printf("  warning: failed to read confirmation: %v", err)
 		return false
 	}

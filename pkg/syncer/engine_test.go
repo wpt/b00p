@@ -3,12 +3,16 @@ package syncer
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
+	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/state"
 )
 
@@ -140,7 +144,7 @@ func TestEngine_ApplyItem_EditedAllSucceedsAdvancesUpdatedAt(t *testing.T) {
 		InState:  true,
 		Edited:   true,
 	}
-	e.applyItem(blogDir, st, item)
+	e.applyItem(st, item)
 
 	reloaded, err := state.Load(blogDir)
 	if err != nil {
@@ -204,7 +208,7 @@ func TestEngine_ApplyItem_FailedCommentsPreservesUpdatedAt(t *testing.T) {
 		InState:  true,
 		Edited:   true,
 	}
-	e.applyItem(blogDir, st, item)
+	e.applyItem(st, item)
 
 	reloaded, _ := state.Load(blogDir)
 	if got := reloaded.Posts["p1"].UpdatedAt; got != 100 {
@@ -270,7 +274,7 @@ func TestEngine_ApplyItem_EditedMdFailurePreservesUpdatedAt(t *testing.T) {
 		InState:  true,
 		Edited:   true,
 	}
-	e.applyItem(blogDir, st, item)
+	e.applyItem(st, item)
 
 	reloaded, err := state.Load(blogDir)
 	if err != nil {
@@ -326,7 +330,7 @@ func TestEngine_ApplyItem_StubPostPreservesDiskAndState(t *testing.T) {
 				InState:  true,
 				Edited:   true,
 			}
-			e.applyItem(blogDir, st, item)
+			e.applyItem(st, item)
 
 			pj, _ := os.ReadFile(filepath.Join(postDir, "post.json"))
 			if !strings.Contains(string(pj), "good payload") {
@@ -395,12 +399,12 @@ func TestEngine_ApplyItem_UnlockedAllOKClearsLocked(t *testing.T) {
 	}
 	item := syncItem{
 		Post:         fresh,
-		DirName:      "p1_freshname", // classify re-derived name; surviving dir must win
+		DirName:      "p1_dir", // ignored: pickDirName decides, and the surviving dir must win
 		Existing:     st.Posts["p1"],
 		InState:      true,
 		JustUnlocked: true,
 	}
-	e.applyItem(blogDir, st, item)
+	e.applyItem(st, item)
 
 	reloaded, _ := state.Load(blogDir)
 	got := reloaded.Posts["p1"]
@@ -451,7 +455,7 @@ func TestEngine_ApplyItem_UnlockedPartialFailureKeepsLocked(t *testing.T) {
 		InState:      true,
 		JustUnlocked: true,
 	}
-	e.applyItem(blogDir, st, item)
+	e.applyItem(st, item)
 
 	reloaded, _ := state.Load(blogDir)
 	got := reloaded.Posts["p1"]
@@ -508,7 +512,7 @@ func TestEngine_ApplyUpdate_ReservedDirGetsSuffix(t *testing.T) {
 		InState:     true,
 		NewComments: true, // comments-only trigger: no per-post fetch needed
 	}
-	e.applyItem(blogDir, st, item)
+	e.applyItem(st, item)
 
 	const want = "shared_aaaabbbb"
 	requireFile(t, filepath.Join(blogDir, want, "comments.json"))
@@ -518,6 +522,235 @@ func TestEngine_ApplyUpdate_ReservedDirGetsSuffix(t *testing.T) {
 	reloaded, _ := state.Load(blogDir)
 	if got := reloaded.Posts["aaaabbbbcccc"].DirName; got != want {
 		t.Errorf("state DirName = %q, want %q (must record the same reserved name the artefacts used)", got, want)
+	}
+}
+
+// A NEW post whose formatted name collides with a tracked post's directory
+// must be suffixed even when that directory's post.json is missing — the
+// disk probe alone reports it as free, and the NEW post would adopt the
+// tracked post's media as its own. loadState seeds the reserver from state.
+func TestEngine_Sync_NewPostDoesNotClaimTrackedDir(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+
+	const publish = int64(1700000000)
+	shared := parser.FormatDirName(parser.DefaultFormat, "", publish, "aaaaaaaa-old")
+	mustMkdir(t, filepath.Join(blogDir, shared))
+	writeFile(t, filepath.Join(blogDir, shared, "image_001.jpg"), "A-image")
+	// No post.json: the FILES_MISSING repair window.
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"aaaaaaaa-old": {Title: "", DirName: shared, UpdatedAt: 100},
+	})
+
+	f.Media("b.jpg", []byte("B-image"))
+	old := boosty.Post{ID: "aaaaaaaa-old", HasAccess: true, PublishTime: publish, UpdatedAt: 100}
+	fresh := boosty.Post{
+		ID: "bbbbbbbb-new", HasAccess: true, PublishTime: publish, UpdatedAt: 300,
+		Data: []boosty.ContentBlock{{Type: "image", URL: f.MediaURL("b.jpg")}},
+	}
+	f.PostsList(blog, fresh, old) // newest first, like the API
+
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir, AutoApply: true})
+	if err := e.Sync(); err != nil {
+		t.Fatalf("Sync: %v\n%s", err, f.log.joined())
+	}
+
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := st.Posts["bbbbbbbb-new"].DirName
+	if got == shared || got == "" {
+		t.Fatalf("NEW post DirName = %q, must be suffixed away from the tracked %q\n%s", got, shared, f.log.joined())
+	}
+	if data, _ := os.ReadFile(filepath.Join(blogDir, got, "image_001.jpg")); string(data) != "B-image" {
+		t.Errorf("NEW post image = %q, want its own bytes", data)
+	}
+	if data, _ := os.ReadFile(filepath.Join(blogDir, shared, "image_001.jpg")); string(data) != "A-image" {
+		t.Errorf("tracked post image = %q, want untouched", data)
+	}
+	if _, err := os.Stat(filepath.Join(blogDir, shared, "post.json")); err == nil {
+		t.Error("NEW post wrote post.json into the tracked post's directory")
+	}
+}
+
+// A post marked Locked by a sync is still in state; the default download
+// mode must re-download it once it is accessible again instead of counting
+// it as already synced forever.
+func TestEngine_DownloadAll_RedownloadsLockedEntry(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","title":"stale","updatedAt":100}`)
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100, Locked: true},
+	})
+
+	fresh := boosty.Post{
+		ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200, PublishTime: 1700000000,
+		Data: []boosty.ContentBlock{{Type: "text", Content: `["body","unstyled",[]]`}},
+	}
+	f.PostsList(blog, fresh)
+
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir})
+	if err := e.DownloadAll(); err != nil {
+		t.Fatalf("DownloadAll: %v\n%s", err, f.log.joined())
+	}
+
+	st, _ := state.Load(blogDir)
+	got := st.Posts["p1"]
+	if got.Locked {
+		t.Error("Locked = true, want false after re-download")
+	}
+	if got.UpdatedAt != 200 {
+		t.Errorf("UpdatedAt = %d, want 200", got.UpdatedAt)
+	}
+	if got.DirName != "p1_dir" {
+		t.Errorf("DirName = %q, want the surviving 'p1_dir'", got.DirName)
+	}
+	pj, _ := os.ReadFile(filepath.Join(postDir, "post.json"))
+	if !strings.Contains(string(pj), `"title": "new"`) {
+		t.Errorf("post.json not refreshed: %s", pj)
+	}
+}
+
+// --force without --md/--comments must keep tracking artefacts that are on
+// disk and regenerate them against the fresh post, not reset the flags.
+func TestEngine_DownloadAll_ForcePreservesTrackedArtefacts(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","title":"old","updatedAt":100}`)
+	writeFile(t, filepath.Join(postDir, "post.md"), "# old")
+	writeFile(t, filepath.Join(postDir, "comments.json"), "[]")
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100, HasMd: true, HasComments: true, CommentsCapped: true},
+	})
+
+	post := boosty.Post{
+		ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 100, PublishTime: 1700000000,
+		Count: boosty.PostCount{Comments: 1},
+		Data:  []boosty.ContentBlock{{Type: "text", Content: `["body","unstyled",[]]`}},
+	}
+	f.PostsList(blog, post)
+	f.CommentsList(blog, "p1", boosty.Comment{ID: "c1"})
+
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir, Force: true})
+	if err := e.DownloadAll(); err != nil {
+		t.Fatalf("DownloadAll: %v\n%s", err, f.log.joined())
+	}
+
+	st, _ := state.Load(blogDir)
+	got := st.Posts["p1"]
+	if !got.HasMd || !got.HasComments {
+		t.Errorf("HasMd=%v HasComments=%v, want both preserved under --force", got.HasMd, got.HasComments)
+	}
+	if got.CommentsCapped {
+		t.Error("CommentsCapped = true, want false (comments were refetched and fit)")
+	}
+	md, _ := os.ReadFile(filepath.Join(postDir, "post.md"))
+	if !strings.Contains(string(md), "# new") {
+		t.Errorf("post.md not regenerated: %q", md)
+	}
+	cj, _ := os.ReadFile(filepath.Join(postDir, "comments.json"))
+	if !strings.Contains(string(cj), `"c1"`) {
+		t.Errorf("comments.json not refetched: %q", cj)
+	}
+}
+
+// SavePost keeps existing media only while the on-disk post.json carries the
+// same updatedAt. An edit may have swapped media at the same slot, so a
+// changed updatedAt re-downloads every item over its stale copy.
+func TestEngine_SavePost_EditedSinceLastSaveReplacesMedia(t *testing.T) {
+	f := newFakeAPI(t)
+	f.Media("img.jpg", []byte("FRESH"))
+	cfg := Config{Blog: "myblog", OutputDir: t.TempDir()}
+	e := New(f.client, cfg)
+
+	post := boosty.Post{
+		ID: "p1", Title: "Hello", HasAccess: true, PublishTime: 1700000000, UpdatedAt: 200,
+		Data: []boosty.ContentBlock{{Type: "image", URL: f.MediaURL("img.jpg")}},
+	}
+	dirName := parser.FormatDirName(parser.DefaultFormat, post.Title, post.PublishTime, post.ID)
+	postDir := filepath.Join(cfg.OutputDir, cfg.Blog, dirName)
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "image_001.jpg"), "STALE")
+
+	// Same updatedAt on disk: the existing image is trusted and kept.
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","updatedAt":200}`)
+	if _, _, err := e.SavePost(&post); err != nil {
+		t.Fatalf("SavePost: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(postDir, "image_001.jpg")); string(data) != "STALE" {
+		t.Errorf("image = %q, want the existing copy kept (post not edited)", data)
+	}
+
+	// Older updatedAt on disk: the post was edited since; media is replaced.
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","updatedAt":100}`)
+	if _, _, err := e.SavePost(&post); err != nil {
+		t.Fatalf("SavePost: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(postDir, "image_001.jpg")); string(data) != "FRESH" {
+		t.Errorf("image = %q, want re-downloaded (post edited since last save)", data)
+	}
+}
+
+// A VIDEO_MISMATCH re-download that fails must leave the previous file in
+// place: with the old delete-then-download order the archive lost every
+// video of the post and no trigger short of another --check-media noticed.
+func TestEngine_ApplyItem_VideoMismatchFailedRedownloadKeepsOldFile(t *testing.T) {
+	saved := boosty.RetryDelays
+	boosty.RetryDelays = []time.Duration{time.Millisecond}
+	defer func() { boosty.RetryDelays = saved }()
+
+	blog := "myblog"
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "video_001.mp4"), "old-video-bytes")
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100},
+	})
+
+	// No Media handler for v.mp4 → the download 404s (non-retriable).
+	post := boosty.Post{
+		ID: "p1", Title: "old", HasAccess: true, UpdatedAt: 100,
+		Data: []boosty.ContentBlock{{
+			Type:       "ok_video",
+			PlayerURLs: []boosty.PlayerURL{{Type: "full_hd", URL: f.MediaURL("v.mp4")}},
+		}},
+	}
+	f.SinglePost(blog, "p1", post)
+
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir})
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.applyItem(st, syncItem{
+		Post: post, DirName: "p1_dir", Existing: st.Posts["p1"], InState: true,
+		VideoMismatch: "video_001.mp4: local 15 B vs remote 99 B",
+	})
+
+	if data, _ := os.ReadFile(filepath.Join(postDir, "video_001.mp4")); string(data) != "old-video-bytes" {
+		t.Errorf("video = %q, want the old bytes kept after a failed re-download", data)
+	}
+	if n := e.failedPosts.Load(); n != 1 {
+		t.Errorf("failedPosts = %d, want 1", n)
+	}
+	reloaded, _ := state.Load(blogDir)
+	if got := reloaded.Posts["p1"].UpdatedAt; got != 100 {
+		t.Errorf("UpdatedAt = %d, want 100 (unchanged)", got)
 	}
 }
 
@@ -908,5 +1141,67 @@ func writeInitialState(t *testing.T, blogDir string, entries map[string]state.Po
 	}
 	if err := os.WriteFile(filepath.Join(blogDir, state.FileName), data, 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// After an edit, the first re-download writes the new post.json before the
+// media replacement fails; the retry must still replace the media. The edit
+// verdict has to come from state (UpdatedAt advances only when every
+// channel landed), not from the post.json now on disk, or the stale bytes
+// are kept and state advances past them.
+func TestEngine_SaveNewPost_FailedMediaReplaceStillReplacesOnRetry(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	var calls atomic.Int32
+	f.HandleFunc("GET", "/_media/img.jpg", func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			http.NotFound(w, r) // deterministic 4xx: fails fast, no retry schedule
+			return
+		}
+		fmt.Fprint(w, "FRESH")
+	})
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","updatedAt":100}`)
+	writeFile(t, filepath.Join(postDir, "image_001.jpg"), "STALE")
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "old", DirName: "p1_dir", UpdatedAt: 100},
+	})
+
+	post := boosty.Post{
+		ID: "p1", Title: "edited", HasAccess: true, UpdatedAt: 200, PublishTime: 1700000000,
+		Data: []boosty.ContentBlock{{Type: "image", URL: f.MediaURL("img.jpg")}},
+	}
+	e := New(f.client, Config{Blog: blog, OutputDir: outDir, Force: true})
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if e.saveNewPost(st, &post) {
+		t.Fatal("first saveNewPost reported success, want the media failure surfaced")
+	}
+	if data, _ := os.ReadFile(filepath.Join(postDir, "image_001.jpg")); string(data) != "STALE" {
+		t.Fatalf("image after failed replace = %q, want the old bytes kept", data)
+	}
+	if got := st.Posts["p1"].UpdatedAt; got != 100 {
+		t.Fatalf("UpdatedAt after failure = %d, want 100 (not advanced)", got)
+	}
+	// post.json on disk now already says 200 — the trap for a disk-only check.
+	if prev, _ := readPostUpdatedAt(postDir); prev != 200 {
+		t.Fatalf("post.json updatedAt = %d, want 200 (written before media)", prev)
+	}
+
+	e.failedPosts.Store(0)
+	if !e.saveNewPost(st, &post) {
+		t.Fatalf("second saveNewPost failed\n%s", f.log.joined())
+	}
+	if data, _ := os.ReadFile(filepath.Join(postDir, "image_001.jpg")); string(data) != "FRESH" {
+		t.Errorf("image after retry = %q, want replaced (post edited since state's UpdatedAt)", data)
+	}
+	if got := st.Posts["p1"].UpdatedAt; got != 200 {
+		t.Errorf("UpdatedAt after retry = %d, want 200", got)
 	}
 }

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -48,24 +49,19 @@ func runStat(cmd *cobra.Command, args []string) error {
 	if err := c.GetJSON(boosty.UserSubscriptionsURL(), &subs); err != nil {
 		c.Log.Printf("  warning: could not fetch subscriptions: %v", err)
 		fmt.Println("  Subscription info unavailable")
+	} else if i := slices.IndexFunc(subs.Data, func(s boosty.Subscription) bool {
+		return strings.EqualFold(s.Blog.BlogURL, statBlog)
+	}); i < 0 {
+		fmt.Printf("  No active subscription to %s\n", statBlog)
 	} else {
-		found := false
-		for _, sub := range subs.Data {
-			if strings.EqualFold(sub.Blog.BlogURL, statBlog) {
-				fmt.Printf("  Blog:   %s\n", sub.Blog.BlogURL)
-				fmt.Printf("  Tier:   %s\n", sub.Name)
-				fmt.Printf("  Price:  %g RUB\n", sub.Price)
-				if sub.IsPaused {
-					fmt.Println("  Status: PAUSED")
-				} else {
-					fmt.Println("  Status: Active")
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			fmt.Printf("  No active subscription to %s\n", statBlog)
+		sub := subs.Data[i]
+		fmt.Printf("  Blog:   %s\n", sub.Blog.BlogURL)
+		fmt.Printf("  Tier:   %s\n", sub.Name)
+		fmt.Printf("  Price:  %g RUB\n", sub.Price)
+		if sub.IsPaused {
+			fmt.Println("  Status: PAUSED")
+		} else {
+			fmt.Println("  Status: Active")
 		}
 	}
 
@@ -76,7 +72,7 @@ func runStat(cmd *cobra.Command, args []string) error {
 	accessible := 0
 	locked := 0
 
-	for post, err := range c.FetchPosts(statBlog, 20) {
+	for post, err := range c.FetchPosts(statBlog, boosty.DefaultPageLimit) {
 		if err != nil {
 			// Same abort-vs-skip contract as DownloadAll/Sync: a page-level
 			// failure kills the run, a single malformed post is skipped so

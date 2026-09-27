@@ -166,10 +166,11 @@ func TestCheckRemoteVideoSize_LocalMissing(t *testing.T) {
 	}
 }
 
-// Replicates the real-world bug: wrong UA causes okcdn to 400 with 2-byte body.
-// Old code read ContentLength=2 and reported every video as mismatched.
-// New code: wrong UA is a 400 → reported as "HEAD 400", not a size comparison.
-func TestCheckRemoteVideoSize_WrongUAYields400(t *testing.T) {
+// A non-200 HEAD (okcdn answers 400 with a 2-byte body to a wrong UA; edges
+// can answer 403/405/5xx) says nothing about the local bytes. It must be
+// logged and skipped: a mismatch verdict would make the apply phase
+// re-download every video in the archive under --yes.
+func TestCheckRemoteVideoSize_Non200IsLoggedNotMismatched(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "v.mp4")
 	os.WriteFile(localPath, make([]byte, 1024), 0644)
@@ -179,8 +180,11 @@ func TestCheckRemoteVideoSize_WrongUAYields400(t *testing.T) {
 
 	log := &recordingLogger{}
 	got := checkRemoteVideoSize(srv.Client(), "Wrong/UA", log, srv.URL, localPath, "v.mp4")
-	if !strings.Contains(got, "HEAD 400") {
-		t.Errorf("got %q, want 'HEAD 400'", got)
+	if got != "" {
+		t.Errorf("got %q, want empty (non-200 HEAD is not a size verdict)", got)
+	}
+	if !strings.Contains(log.joined(), "HEAD 400") {
+		t.Errorf("expected log about HEAD 400, got %q", log.joined())
 	}
 }
 

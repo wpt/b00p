@@ -82,10 +82,9 @@ func (t *Tokens) SaveTokens(path string) error {
 	return fileutil.WriteFileAtomic(path, data, 0600)
 }
 
-// refreshRequest is the POST body sent to /oauth/token/.
-// Modeled as a typed struct so json.Marshal handles escaping for arbitrary
-// token contents (backslashes, quotes, newlines) — earlier code stitched the
-// body with fmt.Sprintf and would have produced invalid JSON on such tokens.
+// refreshRequest is the POST body sent to /oauth/token/. A typed struct so
+// json.Marshal handles escaping for arbitrary token contents (backslashes,
+// quotes, newlines).
 type refreshRequest struct {
 	DeviceID     string `json:"device_id"`
 	RefreshToken string `json:"refresh_token"`

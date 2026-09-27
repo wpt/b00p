@@ -116,7 +116,7 @@ Downloads posts with media. Pick a mode based on what you want to do:
 | Mode | Command | What it does |
 |------|---------|--------------|
 | **New posts only** (default) | `b00p download --blog username` | First-time download or incremental update. Skips posts already in `_state.json`. |
-| **Force re-download** | `b00p download --blog username --force` | Reprocess every post. Existing non-empty media files are still skipped by the integrity check; state is ignored. |
+| **Force re-download** | `b00p download --blog username --force` | Reprocess every post. Existing non-empty media files are still skipped unless the post was edited since it was saved; artefacts a post already has (`post.md`, `comments.json`) are regenerated even without the flag. |
 | **Single post** | `b00p download --url "https://boosty.to/username/posts/id"` | Download one post by URL. Ignores state. |
 | **Smart sync** | `b00p download --blog username --sync` | Fetch the post list, diff against `_state.json` and disk, show the diff, ask `Apply changes? [y/N]`. Detects NEW, UNLOCKED, UPDATED, COMMENTS, VIDEO_MISMATCH, FILES_MISSING, LOCKED, LOCKED_NEW. |
 | **Sync headless** | `b00p download --blog username --sync --yes` | Same as sync but skip the prompt. **Required** for cron / Task Scheduler / any run without a terminal — see [Troubleshooting](#troubleshooting). |
@@ -131,7 +131,7 @@ Content flags (`--md`, `--comments`, `--download-external`, `--format`) combine 
 > b00p download --blog username --force --md --comments
 > ```
 >
-> Media already on disk is skipped by the integrity check, so this is cheap — it re-fetches metadata, not gigabytes.
+> Media already on disk is skipped unless the post was edited since, so this is cheap — it re-fetches metadata, not gigabytes.
 
 ```bash
 # Save markdown and comments alongside post.json
@@ -192,10 +192,10 @@ Apply changes? [y/N]
 
 - **NEW** — accessible post not in state. Downloaded fresh.
 - **LOCKED_NEW** — brand-new post you don't have access to. Counted in the summary but not downloaded or written to state.
-- **UNLOCKED** — was locked, now accessible (subscription upgraded). Triggers full re-download.
+- **UNLOCKED** — was locked, now accessible (subscription upgraded). Re-downloaded like a new post: `post.json`, `post.md` and `comments.json` are refreshed; media is re-fetched only if the post was edited while it was locked.
 - **UPDATED** — author edited the post (`updatedAt` changed).
-- **COMMENTS** — the comment count changed since last download; `comments.json` is re-fetched. (Posts with more than 100 top-level threads are a special case — see [Troubleshooting](#some-posts-always-show-fewer-comments-than-boosty).)
-- **VIDEO_MISMATCH** — a native video's size on disk doesn't match the server. Only native videos are checked. Requires `--check-media`.
+- **COMMENTS** — the comment count changed since last download; `comments.json` is re-fetched. Only for posts whose comments were downloaded (`--comments` at the time) — see the note on retroactivity above. (Posts with more than 100 top-level threads are a special case — see [Troubleshooting](#some-posts-always-show-fewer-comments-than-boosty).)
+- **VIDEO_MISMATCH** — a native video's size on disk doesn't match the server. Only native videos are checked; a HEAD that isn't a plain 200 is logged and skipped rather than treated as a mismatch. The old file stays in place until the replacement has fully downloaded. Requires `--check-media`.
 - **FILES_MISSING** — expected files are missing on disk and get re-fetched. Requires `--check-files`.
 - **LOCKED** — was accessible, now locked (subscription downgraded). On-disk data is kept; the post is just marked locked.
 
@@ -221,12 +221,12 @@ Global flags (apply to every command):
 | `--md` | `false` | Generate `post.md` with frontmatter (price/tier included). Not retroactive — use `--force` to backfill an existing archive |
 | `--comments` | `false` | Download `comments.json`. Not retroactive — use `--force` to backfill an existing archive |
 | `--download-external` | `false` | Download external videos via yt-dlp (best-effort; failures are logged, not retried) |
-| `--force` | `false` | Ignore state and reprocess. Rejected together with `--sync`. Integrity check still skips existing non-empty media. |
+| `--force` | `false` | Ignore state and reprocess. Rejected together with `--sync`. Existing non-empty media is skipped unless the post was edited since it was saved. |
 | `--sync` | `false` | Smart sync with diff and confirmation |
 | `--yes` | `false` | With `--sync`: skip the `Apply changes? [y/N]` prompt — required for cron/headless runs, see [Troubleshooting](#troubleshooting). Without `--sync`: hard error. |
 | `--check-media` | `false` | With `--sync`: validate native video sizes via HEAD. Without `--sync`: hard error. |
 | `--check-files` | `false` | With `--sync`: verify expected files exist on disk. Without `--sync`: hard error. |
-| `--format` | `{date}_{title}` | Post directory name format |
+| `--format` | `{date}_{title}` | Post directory name format. Unknown placeholders are rejected. |
 | `--workers` | `1` | Concurrent post processing — parallelises `download --blog` (default mode), `download --blog --sync` apply phase, and `--check-media` HEAD requests. Values below 1 are rejected (`--workers must be >= 1`). |
 
 ## Directory Name Format
@@ -241,7 +241,7 @@ Variables for `--format`:
 | `{date:d.m.y}` | `13.03.2026` | y=year, m=month, d=day |
 | `{id}` | `e24c0343-...` | Post UUID |
 
-`{title}` is sanitized to be safe on Windows and POSIX filesystems: unsafe characters stripped, whitespace collapsed, length capped at 80 characters; names that end up empty or reserved on Windows (`CON`, `NUL`, ...) are replaced by the post ID. Name collisions are resolved by appending the first 8 characters of the post ID.
+`{title}` is sanitized to be safe on Windows and POSIX filesystems: unsafe characters stripped, whitespace collapsed, length capped at 80 characters (200 bytes, so CJK or emoji titles stay under the Linux filename limit); names that end up empty or reserved on Windows (`CON`, `NUL`, ...) are replaced by the post ID. Name collisions are resolved by appending the first 8 characters of the post ID.
 
 ## Output Structure
 
@@ -274,13 +274,13 @@ Native videos are downloaded only when Boosty offers a direct MP4 variant. A vid
 
 Each blog directory has a `_state.json` that records what's already downloaded, so repeat runs only fetch what's new. Don't hand-edit it; deleting it forces a full re-download (existing files are still skipped by the integrity check, so it's cheap). Sync checks the actual files on disk, not just this cache, so stale or partially-written files heal on the next run without any repair flag.
 
-Locked posts aren't stored — upgrade your subscription and the next run downloads them. Downgrade, and b00p keeps the files you already have.
+Posts you never had access to aren't stored — upgrade your subscription and the next run downloads them. Downgrade, and b00p keeps the files you already have and marks the post locked; once you can read it again, both the default mode and `--sync` re-download it.
 
 `_state.json` is version-stamped. An older b00p refuses to load a state file written by a newer one — saving it back would silently drop fields it doesn't understand — and aborts the run before downloading anything (`state file ... has schema version N, newer than this b00p understands`). Upgrade the binary, or point `--output` somewhere else.
 
 ## Reliability
 
-- **Interrupted runs resume cleanly.** State is saved after each post and partial downloads pick up where they left off, so a killed or crashed run loses nothing — just re-run it. Existing complete files are skipped; empty partials are re-downloaded.
+- **Interrupted runs resume cleanly.** State is saved after each post and partial downloads pick up where they left off — also on the next run, since a partial is tied to the media object rather than to Boosty's expiring signed link — so a killed or crashed run loses nothing; just re-run it. Existing complete files are skipped; empty partials are re-downloaded.
 - **A killed process never corrupts your data.** `post.json`, `post.md`, `comments.json`, `_state.json` and `auth.json` are written to a temp file, fsynced, then renamed into place — Ctrl-C or a crash mid-write leaves the old file intact. Media uses temp + rename without the fsync (it would stall multi-gigabyte writes), so sudden power loss is the one case that can still leave a truncated media file; the next run re-downloads it.
 - **Exit codes.** 0 on success, 1 on any hard error — including a run where 199 posts synced fine and one failed. A sync you cancel exits **0**, and so does one that cancels itself because `--yes` was missing, so cron alerting on exit status won't notice a sync that has silently applied nothing for weeks. Check the log line, not just the code.
 - **Transient errors retry automatically** (network blips, 5xx, rate limits); permanent ones (expired links, deleted media, dead tokens) fail fast with a hint about the cause instead of hammering the server.
@@ -314,7 +314,7 @@ Same fix as the token errors above — the access token expired and the refresh 
 
 ### `API ... returned 403` / post shows up `[LOCKED]`
 
-You don't have the required subscription tier for that post. Not a b00p error. If you upgrade later, the next `--sync` picks it up automatically (shown as `[UNLOCKED]`).
+You don't have the required subscription tier for that post. Not a b00p error. If you upgrade later, the next run picks it up automatically (`--sync` shows it as `[UNLOCKED]`).
 
 ### `API ... returned 404`
 
@@ -336,7 +336,7 @@ b00p download --blog username --sync --yes
 
 The limit is on **threads**, not on the total: a post with more than 100 top-level comment threads, or a single thread with more than 100 replies, can't be fully fetched. That's a hard limit in Boosty's API, not a b00p bug — a post with 300 comments spread over 40 threads is archived in full, so check the thread count before assuming anything is missing.
 
-Once a post does hit the cap, b00p marks it and **stops re-fetching its comments entirely** — it shows up under `N no changes` in every later sync even as the thread keeps growing. That's deliberate: the disk count can never catch up to the API count, so the alternative is firing `[COMMENTS]` forever with no path to closure. To force one fresh fetch, delete that post's `comments.json` and re-run `--sync` (an edit by the author also re-pulls them).
+Once a post hits the cap, b00p marks it and re-fetches its comments only when Boosty's comment count changes (a new thread, a deletion) — once per change, not on every sync. The fetch still cannot get past the cap, so the archive holds the first 100 threads with up to 100 replies each, refreshed on each change. To force a fetch by hand, delete that post's `comments.json` and re-run `--sync` (an edit by the author also re-pulls them).
 
 ### Download fails with `status 403`/`400`/`410` and "signed URL likely expired"
 
@@ -356,7 +356,7 @@ Windows Defender briefly locked a file mid-write. No data is lost (the post just
 
 ## Library Usage
 
-`pkg/boosty` and `pkg/parser` are importable. Full reference lives in godoc; the snippet below is enough to fetch and parse posts.
+`pkg/boosty` and `pkg/parser` are importable, and `pkg/syncer` exposes the CLI's engine (`New`, `Sync`, `DownloadAll`, `SavePost`) for callers that want the whole download/sync flow with their own `Config`. Full reference lives in godoc; the snippet below is enough to fetch and parse posts.
 
 ```go
 package main
@@ -406,7 +406,7 @@ func main() {
 }
 ```
 
-`FetchComments(blog, postID, limit)` yields top-level comments (replies are inlined per item, up to `reply_limit=100`), but unlike `FetchPosts` it returns a **single page**: the Boosty comments endpoint ignores `offset>0`, so pagination is impossible — size `limit` to cover every top-level thread you expect.
+`FetchComments(blog, postID, limit)` returns the top-level comments as a slice (replies are inlined per item, up to `reply_limit=100`). Unlike `FetchPosts` it is a **single page**: the Boosty comments endpoint ignores `offset>0`, so pagination is impossible — size `limit` to cover every top-level thread you expect.
 
 For arbitrary endpoints not covered by a typed iterator, use `client.GetJSON(url, &out)` directly — `boosty.PostURL`, `boosty.PostsURL`, `boosty.CommentsURL`, and friends build the URLs.
 

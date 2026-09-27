@@ -3,12 +3,9 @@ package syncer
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 
 	"github.com/wpt/b00p/pkg/boosty"
-	"github.com/wpt/b00p/pkg/state"
 )
 
 type postJob struct {
@@ -17,9 +14,9 @@ type postJob struct {
 }
 
 // DownloadAll fetches every post in the blog and saves any that are not yet
-// in state. With Config.Force, state is ignored and every accessible post is
-// re-processed (the file-layer integrity check still skips existing non-empty
-// media files).
+// in state, plus tracked posts whose entry is Locked but which are accessible
+// again. With Config.Force, state is ignored and every accessible post is
+// re-processed (see Config.Force for what is still skipped).
 //
 // State is saved per-completed post under a mutex so a mid-run crash leaves
 // a consistent _state.json.
@@ -27,23 +24,16 @@ func (e *Engine) DownloadAll() error {
 	c := e.c
 	c.Log.Printf("Fetching all posts from %s...", e.cfg.Blog)
 
-	blogDir := filepath.Join(e.cfg.OutputDir, e.cfg.Blog)
-	if err := os.MkdirAll(blogDir, 0755); err != nil {
+	blogDir, st, err := e.loadState()
+	if err != nil {
 		return err
 	}
-
-	st, err := state.Load(blogDir)
-	if err != nil {
-		return fmt.Errorf("load state: %w", err)
-	}
-	// state.State is not concurrency-safe (see its doc); saveNewPost takes
-	// e.stMu around every Add/Save pair so workers do not race on st.Posts.
 
 	var jobs []postJob
 	total := 0
 	skippedState := 0
 
-	for post, err := range c.FetchPosts(e.cfg.Blog, 20) {
+	for post, err := range c.FetchPosts(e.cfg.Blog, boosty.DefaultPageLimit) {
 		if err != nil {
 			if errors.Is(err, boosty.ErrFetchPage) {
 				// Whole page failed — abort rather than print
@@ -62,7 +52,7 @@ func (e *Engine) DownloadAll() error {
 			continue
 		}
 
-		if !e.cfg.Force && st.Has(post.ID) {
+		if existing, ok := st.Get(post.ID); ok && !existing.Locked && !e.cfg.Force {
 			skippedState++
 			continue
 		}

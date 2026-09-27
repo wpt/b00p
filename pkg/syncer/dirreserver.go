@@ -56,6 +56,25 @@ func newDirReserver() *dirReserver {
 	return &dirReserver{owned: make(map[string]string)}
 }
 
+// seed records every tracked directory as owned by its post before any
+// worker runs. Without it a tracked folder whose post.json is missing (the
+// FILES_MISSING repair window) reads as free to the disk probe, and a NEW
+// post with the same formatted name claims it — adopting the tracked post's
+// media as its own. Entries with an empty DirName are skipped.
+func (r *dirReserver) seed(blogDir string, posts map[string]state.PostEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, e := range posts {
+		if e.DirName == "" {
+			continue
+		}
+		key := reservationKey(blogDir, e.DirName)
+		if _, taken := r.owned[key]; !taken {
+			r.owned[key] = id
+		}
+	}
+}
+
 // reserve returns a directory name (relative to blogDir) safe to use for the
 // given postID. If base is unowned and either free on disk or already holds
 // this post, base is returned. Otherwise the post ID is appended as a suffix

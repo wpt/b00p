@@ -1,9 +1,9 @@
 package boosty
 
-// Media download path: DownloadFile / downloadOnce and their support
-// machinery (idle-read watchdog, Range resume with the .tmp.url sidecar,
-// non-retriable status classification, progress writer). The request layer
-// (GetJSON, token handling, iterators) lives in client.go.
+// Media download path: Download / downloadOnce and their support machinery
+// (idle-read watchdog, Range resume with the .tmp.url sidecar, non-retriable
+// status classification, progress writer). The request layer (GetJSON,
+// token handling, iterators) lives in client.go.
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,11 +54,16 @@ const (
 	// headers after the request body is fully written. Catches the case
 	// where the TCP connection is established but the server never replies.
 	downloadHeaderTimeout = 60 * time.Second
+
+	// downloadIdleConnsPerHost raises the per-host idle pool above the
+	// net/http default of 2 so --workers N > 2 pulling from one CDN host keep
+	// their connections between files instead of re-handshaking TLS.
+	downloadIdleConnsPerHost = 16
 )
 
 // errNonRetriable marks deterministic failures — a 4xx (other than 429)
 // download status, where re-requesting the same URL yields the same verdict.
-// DownloadFile fails fast on it instead of burning the backoff schedule.
+// Download fails fast on it instead of burning the backoff schedule.
 var errNonRetriable = errors.New("non-retriable")
 
 // newDownloadTransport clones http.DefaultTransport so we inherit modern
@@ -67,18 +73,44 @@ var errNonRetriable = errors.New("non-retriable")
 func newDownloadTransport() http.RoundTripper {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.ResponseHeaderTimeout = downloadHeaderTimeout
+	t.MaxIdleConnsPerHost = downloadIdleConnsPerHost
 	return t
 }
 
-// DownloadFile downloads a URL to a local file path.
-// Skips if file already exists with size > 0. Removes 0-byte files.
-// Uses a separate HTTP client with no timeout for large files.
-// Logs progress with file size.
+// DownloadRequest describes one media download for Client.Download.
+type DownloadRequest struct {
+	URL  string
+	Path string
+
+	// Key identifies the remote object independently of URL signing. A
+	// partial <Path>.tmp left by an earlier attempt is resumed only when the
+	// key recorded in its sidecar matches. Signed okcdn URLs change on every
+	// refresh (expires/sig/srcIp query params), so keying on the URL itself
+	// would restart every cross-run resume from byte 0. Empty means URL.
+	Key string
+
+	// Replace downloads even when Path already holds a non-empty file. The
+	// old file stays in place until the new bytes are renamed over it, so a
+	// failed re-download never leaves the slot empty.
+	Replace bool
+}
+
+// DownloadFile downloads url to path, skipping the download when path
+// already holds a non-empty file (0-byte leftovers are re-downloaded). Media
+// that must be refreshed over an existing copy goes through Download with
+// Replace set.
 func (c *Client) DownloadFile(url, path string) error {
-	// Integrity check: skip existing non-empty files
-	if info, err := os.Stat(path); err == nil {
+	return c.Download(DownloadRequest{URL: url, Path: path})
+}
+
+// Download runs req with the retry schedule: first attempt + one retry per
+// RetryDelays entry on transport errors, 5xx and 429; deterministic 4xx fail
+// fast. Progress is reported through the client's ProgressLogger when it
+// implements one.
+func (c *Client) Download(req DownloadRequest) error {
+	if info, err := os.Stat(req.Path); err == nil && !req.Replace {
 		if info.Size() > 0 {
-			c.Log.Printf("  skipping %s (already exists, %s)", path, FormatSize(info.Size()))
+			c.Log.Printf("  skipping %s (already exists, %s)", req.Path, FormatSize(info.Size()))
 			return nil
 		}
 		// Remove 0-byte files. Best-effort: downloadOnce writes to <path>.tmp
@@ -87,18 +119,18 @@ func (c *Client) DownloadFile(url, path string) error {
 		// cleanliness step, not a correctness prerequisite. A transient failure
 		// here (e.g. a Windows AV/indexer briefly holding the file open) must
 		// not abort a download the rename would otherwise complete.
-		if err := fileutil.RemoveIfExists(path); err != nil {
-			c.Log.Printf("  warning: failed to remove zero-byte file %s: %v", path, err)
+		if err := fileutil.RemoveIfExists(req.Path); err != nil {
+			c.Log.Printf("  warning: failed to remove zero-byte file %s: %v", req.Path, err)
 		}
 	}
 
 	var lastErr error
 	for attempt := 0; attempt <= len(RetryDelays); attempt++ {
 		if attempt > 0 {
-			c.waitRetry("download retry", attempt)
+			c.waitRetry("download retry", attempt, lastErr)
 		}
 
-		err := c.downloadOnce(url, path)
+		err := c.downloadOnce(req)
 		if err == nil {
 			return nil
 		}
@@ -115,42 +147,85 @@ func (c *Client) DownloadFile(url, path string) error {
 
 var spinnerFrames = []rune{'⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'}
 
-func (c *Client) downloadOnce(url, path string) error {
+// resumeSidecar is the content of <tmp>.url: the key the partial was
+// downloaded against and the total object size the server advertised (0 when
+// unknown). Both must match on resume — the key guards against a different
+// object at the same slot, the size against the same object re-encoded at a
+// different quality between runs.
+type resumeSidecar struct {
+	Key   string
+	Total int64
+}
+
+func (s resumeSidecar) encode() []byte {
+	return []byte(s.Key + "\n" + strconv.FormatInt(s.Total, 10) + "\n")
+}
+
+func parseResumeSidecar(data []byte) resumeSidecar {
+	key, rest, _ := strings.Cut(string(data), "\n")
+	total, _ := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+	return resumeSidecar{Key: key, Total: total}
+}
+
+// contentRangeTotal extracts the complete-length from a Content-Range
+// header ("bytes 4-7/8" → 8). Returns 0 when the header is malformed or the
+// length is "*" (unknown).
+func contentRangeTotal(cr string) int64 {
+	_, total, ok := strings.Cut(cr, "/")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(total), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// dropPartial removes the tmp/sidecar pair after a resume verdict that made
+// the partial untrustworthy. A failed removal is marked non-retriable: the
+// next attempt would resume the same bytes and re-hit the same verdict, so
+// burning the backoff schedule cannot help.
+func dropPartial(tmpPath, sidecarPath string) error {
+	if err := removePair(tmpPath, sidecarPath); err != nil {
+		return fmt.Errorf("tmp reset failed: %w", errors.Join(err, errNonRetriable))
+	}
+	return nil
+}
+
+func (c *Client) downloadOnce(req DownloadRequest) error {
+	url, path := req.URL, req.Path
+	if req.Key == "" {
+		req.Key = url
+	}
 	tmpPath := path + ".tmp"
 	sidecarPath := tmpPath + ".url"
 	// Use filename (not url) in error messages — okcdn signed URLs carry
-	// IP-bound credentials in their query string and path; surfacing them
-	// to stdout on every transient failure leaks the same secret the
-	// Reliability section warns about.
+	// IP-bound credentials in their query string; surfacing them on every
+	// transient failure leaks the same secret the Reliability section warns
+	// about.
 	filename := filepath.Base(path)
 
-	// Resume from an existing partial tmp if one is present. A previous
-	// retry (or a crashed run) may have left the first N bytes on disk; we
-	// can ask the server to ship only the rest via a Range request. Saves
-	// bandwidth and wall time on flaky networks where a multi-GB video
-	// might otherwise restart from byte 0 on every attempt.
-	//
-	// Resume is only safe if the bytes already on disk were downloaded from
-	// the same URL we're about to request — otherwise the head bytes of the
-	// stale URL would be concatenated with the tail of the new URL, which
-	// the size check in --check-media cannot distinguish from a clean file.
-	// The sidecar <tmp>.url records the URL the tmp was opened against.
-	var resumeFrom int64
+	// Resume from an existing partial tmp if one is present: a previous retry
+	// or a crashed run may have left the first N bytes on disk, and the server
+	// can ship only the rest via a Range request. The sidecar must name the
+	// same object (see DownloadRequest.Key) — otherwise the head bytes of one
+	// object would be concatenated with the tail of another, which the size
+	// check in --check-media cannot distinguish from a clean file.
+	var resumeFrom, expectedTotal int64
 	if info, err := os.Stat(tmpPath); err == nil && info.Mode().IsRegular() {
-		sidecar, readErr := os.ReadFile(sidecarPath)
-		if readErr == nil && string(sidecar) == url {
+		data, readErr := os.ReadFile(sidecarPath)
+		if sc := parseResumeSidecar(data); readErr == nil && sc.Key == req.Key {
 			resumeFrom = info.Size()
+			expectedTotal = sc.Total
 		} else {
 			if readErr != nil && !os.IsNotExist(readErr) {
 				c.Log.Printf("  warning: failed to read resume sidecar %s: %v", sidecarPath, readErr)
 			}
-			// URL changed (signed URL refreshed, or no sidecar from a pre-
-			// sidecar run): drop the stale partial so we restart cleanly.
-			// Best-effort: the truncating os.Create + sidecar rewrite below
-			// restart from byte 0 regardless, so a failed unlink (e.g. a
-			// writable file in a non-writable dir, where unlink needs dir
-			// write but O_TRUNC needs only file write) must not abort an
-			// otherwise-fine download.
+			// Different object (or no sidecar): drop the stale partial so we
+			// restart cleanly. Best-effort: the truncating os.Create + sidecar
+			// rewrite below restart from byte 0 regardless, so a failed unlink
+			// must not abort an otherwise-fine download.
 			if err := removePair(tmpPath, sidecarPath); err != nil {
 				c.Log.Printf("  warning: failed to reset stale tmp for %s: %v", filename, err)
 			}
@@ -165,18 +240,18 @@ func (c *Client) downloadOnce(url, path string) error {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", filename, RedactURLError(err))
 	}
 	// okcdn signed URLs bind to the User-Agent used when obtaining them (see
 	// srcAg=... in the URL). Reuse the client UA or the server returns 400.
-	req.Header.Set("User-Agent", UserAgent)
+	httpReq.Header.Set("User-Agent", UserAgent)
 	if resumeFrom > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
+		httpReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", resumeFrom))
 	}
 
-	resp, err := c.DownloadHTTP.Do(req)
+	resp, err := c.DownloadHTTP.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", filename, RedactURLError(err))
 	}
@@ -197,43 +272,31 @@ func (c *Client) downloadOnce(url, path string) error {
 		// Server ignored our Range header (if any). resumeFrom is reset
 		// below; tmp is truncated and write starts at byte 0.
 	case http.StatusPartialContent:
-		// Server honored Range. Verify the first byte of the returned range
-		// matches our resumeFrom — a misbehaving CDN that returns a wider
-		// prefix (e.g. `bytes 500-/total` when we asked `bytes 1000-`) would
-		// otherwise have its first 500 bytes O_APPEND'd onto the existing
-		// tmp, duplicating those bytes. Spec (RFC 7233) requires first ==
-		// our requested first; non-conforming responses get the safe path:
-		// treat as 200 (truncate and restart).
+		// Server honored Range. The returned range must start exactly at
+		// resumeFrom (RFC 7233) — a CDN answering a wider prefix would have
+		// its first bytes O_APPEND'd onto the tmp, duplicating them — and the
+		// advertised total must match the one the partial was opened
+		// against, or the object was re-encoded between runs. Either way the
+		// partial is untrustworthy: drop it and let the retry restart at 0.
 		if resumeFrom > 0 {
 			cr := resp.Header.Get("Content-Range")
 			expectedPrefix := fmt.Sprintf("bytes %d-", resumeFrom)
-			if !strings.HasPrefix(cr, expectedPrefix) {
-				c.Log.Printf("  warning: server returned 206 with unexpected Content-Range %q (wanted %s); restarting from 0", cr, expectedPrefix)
-				// Drop the partial — we can't trust its alignment any more.
+			total := contentRangeTotal(cr)
+			if !strings.HasPrefix(cr, expectedPrefix) || (expectedTotal > 0 && total > 0 && total != expectedTotal) {
+				c.Log.Printf("  warning: server returned 206 with Content-Range %q (wanted %s, total %d); restarting from 0", cr, expectedPrefix, expectedTotal)
 				resp.Body.Close()
-				if err := removePair(tmpPath, sidecarPath); err != nil {
-					// Reset failed: the stale tmp + matching sidecar survive, so
-					// a retry would resume the same offset and re-hit the same
-					// 206 mismatch forever. Fail non-retriable instead of
-					// burning the whole backoff schedule (same rationale as the
-					// close-error branch below).
-					return fmt.Errorf("download %s: Content-Range %q does not start at %d; reset failed: %w",
-						filename, cr, resumeFrom, errors.Join(err, errNonRetriable))
+				if err := dropPartial(tmpPath, sidecarPath); err != nil {
+					return fmt.Errorf("download %s: Content-Range %q rejected; %w", filename, cr, err)
 				}
-				return fmt.Errorf("download %s: Content-Range %q does not start at %d", filename, cr, resumeFrom)
+				return fmt.Errorf("download %s: Content-Range %q rejected; tmp reset", filename, cr)
 			}
+			c.Log.Printf("  resuming %s from %s", filename, FormatSize(resumeFrom))
 		}
 	case http.StatusRequestedRangeNotSatisfiable:
 		// Our tmp file is larger than the server-side resource (signed URL
-		// pointing at a re-encoded variant, or server-side rotation). Drop
-		// the tmp and its sidecar so the next attempt starts fresh.
-		if err := removePair(tmpPath, sidecarPath); err != nil {
-			// Reset failed: the oversized tmp + matching sidecar survive, so a
-			// retry resumes the same offset and re-hits 416 every time. Fail
-			// non-retriable rather than looping the backoff schedule (same
-			// rationale as the close-error branch below).
-			return fmt.Errorf("download %s: range not satisfiable; tmp reset failed: %w",
-				filename, errors.Join(err, errNonRetriable))
+		// pointing at a re-encoded variant, or server-side rotation).
+		if err := dropPartial(tmpPath, sidecarPath); err != nil {
+			return fmt.Errorf("download %s: range not satisfiable; %w", filename, err)
 		}
 		return fmt.Errorf("download %s: range not satisfiable; tmp reset", filename)
 	default:
@@ -251,8 +314,8 @@ func (c *Client) downloadOnce(url, path string) error {
 		}
 		statusErr := fmt.Errorf("download %s: status %d%s: %s", filename, resp.StatusCode, hint, bodyStr)
 		// 4xx other than 429 is deterministic — same URL, same verdict — so
-		// mark it non-retriable and let DownloadFile fail fast. 429 and 5xx
-		// are transient by nature and keep the retry schedule.
+		// mark it non-retriable and let Download fail fast. 429 and 5xx are
+		// transient by nature and keep the retry schedule.
 		if deterministic4xx(resp.StatusCode) {
 			return fmt.Errorf("%w (%w)", statusErr, errNonRetriable)
 		}
@@ -286,13 +349,6 @@ func (c *Client) downloadOnce(url, path string) error {
 	if err != nil {
 		return fmt.Errorf("create file %s: %w", tmpPath, err)
 	}
-	// Pin the URL the tmp is now associated with so the next retry can
-	// verify the resume target hasn't shifted. Best-effort: a sidecar write
-	// failure only weakens future resume (we'd treat the tmp as orphaned
-	// and re-download from scratch), not correctness of this attempt.
-	if err := os.WriteFile(sidecarPath, []byte(url), 0644); err != nil {
-		c.Log.Printf("  warning: failed to write resume sidecar %s: %v", sidecarPath, err)
-	}
 
 	// Total bytes once known: 200 returns full size in ContentLength; 206
 	// returns the remaining range, so we add resumeFrom to recover the full
@@ -300,6 +356,15 @@ func (c *Client) downloadOnce(url, path string) error {
 	totalSize := resp.ContentLength
 	if resp.StatusCode == http.StatusPartialContent && totalSize > 0 {
 		totalSize += resumeFrom
+	}
+
+	// Pin the object the tmp is now associated with so the next attempt can
+	// verify the resume target hasn't shifted. Best-effort: a sidecar write
+	// failure only weakens future resume (we'd treat the tmp as orphaned
+	// and re-download from scratch), not correctness of this attempt.
+	sc := resumeSidecar{Key: req.Key, Total: max(totalSize, 0)}
+	if err := os.WriteFile(sidecarPath, sc.encode(), 0644); err != nil {
+		c.Log.Printf("  warning: failed to write resume sidecar %s: %v", sidecarPath, err)
 	}
 
 	plog, hasProgress := c.Log.(ProgressLogger)
@@ -338,25 +403,16 @@ func (c *Client) downloadOnce(url, path string) error {
 	}
 	if copyErr != nil || closeErr != nil {
 		// Leave the partial tmp in place when only the copy errored — the
-		// retry loop in DownloadFile re-enters downloadOnce, sees the tmp,
-		// and resumes via Range. If the failure is structural, the next
-		// attempt either receives 416 (handled above, tmp dropped) or 200
-		// (server ignored Range, tmp truncated above). If the close itself
-		// errored, the file's durability is suspect — drop the tmp so the
-		// next attempt starts fresh rather than resuming garbage. The
-		// sidecar goes with it — tmp and sidecar are always dropped (or
-		// kept) as a pair so the pairing never has to be reasoned about.
+		// retry loop in Download re-enters downloadOnce, sees the tmp, and
+		// resumes via Range. If the failure is structural, the next attempt
+		// either receives 416 (handled above, tmp dropped) or 200 (server
+		// ignored Range, tmp truncated above). If the close itself errored,
+		// the file's durability is suspect — drop the tmp so the next attempt
+		// starts fresh rather than resuming unflushed bytes. The sidecar goes
+		// with it: tmp and sidecar are always dropped (or kept) as a pair.
 		if closeErr != nil {
-			if err := removePair(tmpPath, sidecarPath); err != nil {
-				// The durability-suspect tmp (and possibly its matching
-				// sidecar) survive on disk. A retry would stat the tmp, find a
-				// matching sidecar, and Range-resume from those unflushed bytes
-				// — the exact "resume garbage" this branch exists to prevent.
-				// Mark non-retriable so DownloadFile stops instead of appending
-				// onto the suspect tmp. (When cleanup SUCCEEDS the tmp is gone,
-				// so the next attempt restarts from byte 0 — safe to retry.)
-				return fmt.Errorf("write %s: %w", path,
-					errors.Join(copyErr, closeErr, fmt.Errorf("cleanup tmp: %w", err), errNonRetriable))
+			if err := dropPartial(tmpPath, sidecarPath); err != nil {
+				return fmt.Errorf("write %s: %w", path, errors.Join(copyErr, closeErr, err))
 			}
 		}
 		return fmt.Errorf("write %s: %w", path, errors.Join(copyErr, closeErr))

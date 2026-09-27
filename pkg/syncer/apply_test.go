@@ -1,12 +1,9 @@
 package syncer
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/wpt/b00p/pkg/boosty"
-	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/state"
 )
 
@@ -359,134 +356,6 @@ func TestDecideApplyActions_NeedFetch(t *testing.T) {
 				t.Errorf("NeedFetch = %v, want %v", got, tc.want)
 			}
 		})
-	}
-}
-
-// --- invalidateMediaForRedownload: skip-existing override ---
-//
-// Regression: DownloadFile skips existing
-// non-empty files, so an edited post that replaces media at the same
-// filename (image_001.jpg, video_001.mp4) would keep the stale bytes
-// while the apply path silently recorded success. invalidateMedia must
-// remove the right files for the right trigger.
-
-func TestInvalidateMedia_EditedRemovesAllNonExternal(t *testing.T) {
-	dir := t.TempDir()
-	must := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	must("image_001.jpg", "stale-image")
-	must("video_001.mp4", "stale-video")
-	must("external_video_001", "should-not-be-touched")
-
-	media := []parser.MediaItem{
-		{Type: "image", Filename: "image_001.jpg"},
-		{Type: "video", Filename: "video_001.mp4"},
-		{Type: "external_video", Filename: "external_video_001"},
-	}
-	log := &recordingLogger{}
-
-	if !invalidateMediaForRedownload(media, dir, true /*edited*/, log) {
-		t.Fatalf("returned false; log=%s", log.joined())
-	}
-
-	if _, err := os.Stat(filepath.Join(dir, "image_001.jpg")); !os.IsNotExist(err) {
-		t.Errorf("image_001.jpg should have been removed; err=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "video_001.mp4")); !os.IsNotExist(err) {
-		t.Errorf("video_001.mp4 should have been removed; err=%v", err)
-	}
-	// external_video must be left alone — DownloadMedia ignores it, so
-	// removing here would lose data the user manually fetched.
-	if _, err := os.Stat(filepath.Join(dir, "external_video_001")); err != nil {
-		t.Errorf("external_video_001 should NOT have been removed; err=%v", err)
-	}
-}
-
-func TestInvalidateMedia_PureVideoMismatchOnlyRemovesVideos(t *testing.T) {
-	dir := t.TempDir()
-	must := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	must("image_001.jpg", "good-image")
-	must("video_001.mp4", "wrong-size-video")
-
-	media := []parser.MediaItem{
-		{Type: "image", Filename: "image_001.jpg"},
-		{Type: "video", Filename: "video_001.mp4"},
-	}
-	log := &recordingLogger{}
-
-	if !invalidateMediaForRedownload(media, dir, false /*edited=false → pure VideoMismatch*/, log) {
-		t.Fatalf("returned false; log=%s", log.joined())
-	}
-
-	// Image must NOT be removed — pure VideoMismatch only invalidates videos.
-	if _, err := os.Stat(filepath.Join(dir, "image_001.jpg")); err != nil {
-		t.Errorf("image_001.jpg should NOT have been removed under VideoMismatch only; err=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "video_001.mp4")); !os.IsNotExist(err) {
-		t.Errorf("video_001.mp4 should have been removed; err=%v", err)
-	}
-}
-
-// Stale .tmp orphans from a prior crash (Client.downloadOnce writes to
-// <path>.tmp and renames; SIGKILL mid-copy leaves the .tmp) must be dropped
-// alongside the final path. Otherwise the next DownloadFile would see the
-// stale partial and resume via Range — but the URL has changed (Edited post
-// replaced the video, signed URL refreshed), so head-bytes-from-old + tail-
-// bytes-from-new would silently concatenate into a corrupt file that
-// --check-media cannot detect when sizes match. This test pins the
-// updated contract: both the final path and its .tmp/.tmp.url sidecars
-// are gone after invalidation.
-func TestInvalidateMedia_StaleTmpAlsoDropped(t *testing.T) {
-	dir := t.TempDir()
-	must := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	must("video_001.mp4", "stale-video")
-	must("video_001.mp4.tmp", "partial-from-crash")
-	must("video_001.mp4.tmp.url", "https://old.cdn.example/expired-url")
-
-	media := []parser.MediaItem{
-		{Type: "video", Filename: "video_001.mp4"},
-	}
-	log := &recordingLogger{}
-
-	if !invalidateMediaForRedownload(media, dir, true /*edited*/, log) {
-		t.Fatalf("returned false despite a stale .tmp; log=%s", log.joined())
-	}
-	for _, name := range []string{"video_001.mp4", "video_001.mp4.tmp", "video_001.mp4.tmp.url"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should have been removed; err=%v", name, err)
-		}
-	}
-}
-
-// ENOENT (file already gone or never existed) is normal and must not
-// fail the invalidation — DownloadMedia will then create the file fresh.
-func TestInvalidateMedia_MissingFilesAreOK(t *testing.T) {
-	dir := t.TempDir()
-	media := []parser.MediaItem{
-		{Type: "image", Filename: "image_001.jpg"},
-		{Type: "video", Filename: "video_001.mp4"},
-	}
-	log := &recordingLogger{}
-
-	if !invalidateMediaForRedownload(media, dir, true, log) {
-		t.Fatalf("returned false on missing files; log=%s", log.joined())
-	}
-	if log.joined() != "" {
-		t.Errorf("expected no log lines for missing files, got %q", log.joined())
 	}
 }
 

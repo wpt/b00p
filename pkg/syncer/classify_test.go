@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/wpt/b00p/pkg/boosty"
-	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/state"
 )
 
@@ -132,7 +131,7 @@ func TestClassifyPost_DiskMissesReplies_TriggersNewComments(t *testing.T) {
 	}
 	post.Count.Comments = 4
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.NewComments {
 		t.Error("NewComments = false, want true (disk has 3, API claims 4)")
 	}
@@ -168,7 +167,7 @@ func TestClassifyPost_DiskMatchesAPI_NoNewComments(t *testing.T) {
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
 	post.Count.Comments = 4
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if got.NewComments {
 		t.Errorf("NewComments = true, want false (disk=4 matches API=4); DiskCommentCount=%d", got.DiskCommentCount)
 	}
@@ -198,7 +197,7 @@ func TestClassifyPost_HasCommentsTrueButFileMissing_TriggersWhenAPIHasAny(t *tes
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
 	post.Count.Comments = 5 // matches state, but file is gone
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.NewComments {
 		t.Error("NewComments = false, want true (file missing + API has comments)")
 	}
@@ -227,7 +226,7 @@ func TestClassifyPost_FileMissingAPIZero_NoNewComments(t *testing.T) {
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
 	post.Count.Comments = 0
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if got.NewComments {
 		t.Error("NewComments = true, want false (no comments anywhere)")
 	}
@@ -261,7 +260,7 @@ func TestClassifyPost_CappedDiskBelowAPI_Suppressed(t *testing.T) {
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
 	post.Count.Comments = 120 // far above disk: the unreachable catch-up case
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if got.NewComments {
 		t.Error("NewComments = true, want false (capped post with disk < API must stay suppressed)")
 	}
@@ -289,15 +288,50 @@ func TestClassifyPost_CappedDiskAboveAPI_StillFires(t *testing.T) {
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
 	post.Count.Comments = 3 // deletions pushed API below disk
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.NewComments {
 		t.Error("NewComments = false, want true (deletions must fire even for capped posts so the flag can heal)")
 	}
 }
 
-// HasComments=false → preserves legacy state-vs-API count comparison.
-// We have no comments.json to consult for posts the user opted out of.
-func TestClassifyPost_HasCommentsFalse_FallsBackToStateCheck(t *testing.T) {
+// A capped post whose API count moved since the last fetch (new thread,
+// deletion) must refetch once — the disk count is permanently below the API
+// and cannot be the baseline.
+func TestClassifyPost_CappedAPIMoved_Fires(t *testing.T) {
+	blogDir := t.TempDir()
+	postDir := filepath.Join(blogDir, "post-dir")
+	os.MkdirAll(postDir, 0755)
+	os.WriteFile(filepath.Join(postDir, "comments.json"),
+		[]byte(`[{"id":"1"},{"id":"2"},{"id":"3"}]`), 0644)
+
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	st.Add("post1", state.PostEntry{
+		DirName:        "post-dir",
+		HasComments:    true,
+		CommentsCapped: true,
+		CommentsCount:  120,
+		UpdatedAt:      100,
+	})
+
+	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
+	post.Count.Comments = 121
+
+	got := classifyPost(post, st, blogDir)
+	if !got.NewComments {
+		t.Error("NewComments = false, want true (capped post: API count 120 → 121 since last fetch)")
+	}
+	if d := got.Detail(); !strings.Contains(d, "120 → 121") || !strings.Contains(d, "capped") {
+		t.Errorf("Detail = %q, want the cached→API pair and the capped marker", d)
+	}
+}
+
+// HasComments=false → comments were never requested for this post, so a
+// count change must not fetch them (content flags are not retroactive;
+// --force backfills).
+func TestClassifyPost_HasCommentsFalse_NeverFires(t *testing.T) {
 	blogDir := t.TempDir()
 	postDir := filepath.Join(blogDir, "post-dir")
 	os.MkdirAll(postDir, 0755)
@@ -314,11 +348,11 @@ func TestClassifyPost_HasCommentsFalse_FallsBackToStateCheck(t *testing.T) {
 	})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
-	post.Count.Comments = 5 // grew from 3 → triggers under fallback path
+	post.Count.Comments = 5
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
-	if !got.NewComments {
-		t.Error("NewComments = false, want true (HasComments=false, count grew 3→5)")
+	got := classifyPost(post, st, blogDir)
+	if got.NewComments {
+		t.Error("NewComments = true, want false (comments not tracked for this post)")
 	}
 }
 
@@ -339,7 +373,7 @@ func TestClassifyPost_NotInState_HasAccess_IsNew(t *testing.T) {
 	post := boosty.Post{ID: "post1", Title: "Hello", HasAccess: true, UpdatedAt: 200}
 	post.PublishTime = 1700000000
 
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.IsNew {
 		t.Error("IsNew = false, want true")
 	}
@@ -357,51 +391,6 @@ func TestClassifyPost_NotInState_HasAccess_IsNew(t *testing.T) {
 // An empty DirName collapses every blogDir-relative path onto the blog root
 // (filepath.Join(dir, "") == dir). The entry must be discarded and the post
 // re-classified as NEW instead of updated in place.
-func TestClassifyPost_InState_EmptyDirName_ReclassifiedAsNew(t *testing.T) {
-	blogDir := t.TempDir()
-	st, err := state.Load(blogDir)
-	if err != nil {
-		t.Fatalf("state.Load: %v", err)
-	}
-	// The file the poisoned entry would have been counted against. Reading it
-	// is exactly the bug, so its presence must not change the verdict.
-	os.WriteFile(filepath.Join(blogDir, "comments.json"),
-		[]byte(`[{"id":"1"},{"id":"2"}]`), 0644)
-
-	st.Add("post1", state.PostEntry{
-		Title:       "Hello",
-		DirName:     "",
-		UpdatedAt:   100,
-		HasComments: true,
-		HasMd:       true,
-	})
-
-	post := boosty.Post{ID: "post1", Title: "Hello", HasAccess: true, UpdatedAt: 200}
-	post.PublishTime = 1700000000
-	post.Count.Comments = 5
-
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
-	if !got.IsNew {
-		t.Error("IsNew = false, want true (unusable state entry discarded)")
-	}
-	if got.InState {
-		t.Error("InState = true, want false")
-	}
-	if !got.DirNameMissing {
-		t.Error("DirNameMissing = false, want true")
-	}
-	if got.Edited || got.NewComments {
-		t.Errorf("Edited=%v NewComments=%v, want both false — the in-place update path must never run against the blog root",
-			got.Edited, got.NewComments)
-	}
-	if got.DiskCommentCount != -1 {
-		t.Errorf("DiskCommentCount = %d, want -1 (the blog root's comments.json must not be read)", got.DiskCommentCount)
-	}
-	if d := got.Detail(); !strings.Contains(d, "no directory name") {
-		t.Errorf("Detail() = %q, want it to name the discarded entry so the re-download is not silent", d)
-	}
-}
-
 func TestClassifyPost_NotInState_NoAccess_IsLockedNew(t *testing.T) {
 	blogDir := t.TempDir()
 	st, err := state.Load(blogDir)
@@ -410,7 +399,7 @@ func TestClassifyPost_NotInState_NoAccess_IsLockedNew(t *testing.T) {
 	}
 
 	post := boosty.Post{ID: "post1", Title: "Hello", HasAccess: false}
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.IsLockedNew {
 		t.Error("IsLockedNew = false, want true")
 	}
@@ -428,7 +417,7 @@ func TestClassifyPost_InState_LostAccess_JustLocked(t *testing.T) {
 	st.Add("post1", state.PostEntry{DirName: "post-dir", UpdatedAt: 100, Locked: false})
 
 	post := boosty.Post{ID: "post1", HasAccess: false}
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.JustLocked {
 		t.Error("JustLocked = false, want true")
 	}
@@ -449,7 +438,7 @@ func TestClassifyPost_InState_AlreadyLocked_NoFlag(t *testing.T) {
 	st.Add("post1", state.PostEntry{DirName: "post-dir", Locked: true})
 
 	post := boosty.Post{ID: "post1", HasAccess: false}
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if got.JustLocked {
 		t.Error("JustLocked = true, want false (was already locked)")
 	}
@@ -458,7 +447,7 @@ func TestClassifyPost_InState_AlreadyLocked_NoFlag(t *testing.T) {
 	}
 }
 
-func TestClassifyPost_InState_RegainedAccess_JustUnlocked_RefreshesDirName(t *testing.T) {
+func TestClassifyPost_InState_RegainedAccess_JustUnlocked(t *testing.T) {
 	blogDir := t.TempDir()
 	st, err := state.Load(blogDir)
 	if err != nil {
@@ -472,14 +461,17 @@ func TestClassifyPost_InState_RegainedAccess_JustUnlocked_RefreshesDirName(t *te
 		ID: "post1", Title: "Brand New Title", HasAccess: true,
 		PublishTime: 1700000000, UpdatedAt: 100,
 	}
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.JustUnlocked {
 		t.Error("JustUnlocked = false, want true")
 	}
-	// DirName must be re-formatted from the current title (the previous run
-	// may have stored a placeholder name when the post was locked).
-	if got.DirName == "old-dir-name" {
-		t.Error("DirName preserved on JustUnlocked; want fresh format from current title")
+	if got.Edited || got.IsNew || got.JustLocked {
+		t.Errorf("Edited=%v IsNew=%v JustLocked=%v, want only JustUnlocked", got.Edited, got.IsNew, got.JustLocked)
+	}
+	// The directory is decided at apply time (pickDirName prefers the
+	// surviving folder); classify just carries the tracked name through.
+	if got.DirName != "old-dir-name" {
+		t.Errorf("DirName = %q, want the tracked name carried through", got.DirName)
 	}
 }
 
@@ -492,7 +484,7 @@ func TestClassifyPost_InState_UpdatedAtChanged_Edited(t *testing.T) {
 	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 100})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 200}
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if !got.Edited {
 		t.Error("Edited = false, want true (UpdatedAt 100→200)")
 	}
@@ -510,7 +502,7 @@ func TestClassifyPost_InState_UpdatedAtUnchanged_NotEdited(t *testing.T) {
 	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 100})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if got.Edited {
 		t.Error("Edited = true, want false (UpdatedAt unchanged)")
 	}
@@ -527,7 +519,7 @@ func TestClassifyPost_InState_LegacyZeroUpdatedAt_Backfill(t *testing.T) {
 	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 0})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 12345}
-	got := classifyPost(post, st, blogDir, parser.DefaultFormat)
+	got := classifyPost(post, st, blogDir)
 	if got.Edited {
 		t.Error("Edited = true, want false (legacy UpdatedAt=0 must backfill, not edit)")
 	}
@@ -641,21 +633,6 @@ func TestSyncItem_Detail_CommentsFileMissingNamesTheReason(t *testing.T) {
 	}
 	if strings.Contains(got, "→") {
 		t.Errorf("Detail = %q, must not render a from→to pair for a missing file", got)
-	}
-}
-
-func TestSyncItem_Detail_CommentsFromCachedWhenHasCommentsFalse(t *testing.T) {
-	// HasComments=false → no disk file ever existed; cached state is the
-	// only available source even if DiskCommentCount happens to be set.
-	item := syncItem{
-		Existing:         state.PostEntry{HasComments: false, CommentsCount: 3},
-		DiskCommentCount: 99,
-		NewComments:      true,
-	}
-	item.Post.Count.Comments = 8
-
-	if got := item.Detail(); !strings.Contains(got, "comments: 3 → 8") {
-		t.Errorf("Detail = %q, want cached count (3) when !HasComments", got)
 	}
 }
 

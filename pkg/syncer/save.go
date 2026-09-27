@@ -2,7 +2,6 @@ package syncer
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,118 +10,123 @@ import (
 	"github.com/wpt/b00p/pkg/downloader"
 	"github.com/wpt/b00p/pkg/fileutil"
 	"github.com/wpt/b00p/pkg/parser"
-	"github.com/wpt/b00p/pkg/state"
 )
 
 // commentsPageLimit is the per-page limit for the comments listing endpoint.
-// Boosty's offset query param is effectively ignored on the comments endpoint
-// (offset>0 returns data=[] with isLast=true, so paginated fetching never
-// advances past the first page), but the server honors limit values up to
-// ~200 in a single call.
+// Boosty's offset query param is ignored on that endpoint (offset>0 returns
+// data=[] with isLast=true), so the first page is the whole result; the
+// server honors limit values up to ~200 in a single call.
 //
 // 101 = 100 expected + 1 probe slot: a post with EXACTLY 100 top-level
 // threads returns 100 here (uncapped), while a post with >100 top-level
 // threads returns 101 (capped). With a flat limit of 100 the two cases are
 // indistinguishable and posts that happen to sit at the boundary would be
-// permanently flagged CommentsCapped, suppressing all future refetch even
-// though the comments fit. The 101st entry is kept in the saved file.
+// permanently flagged CommentsCapped. The 101st entry is kept in the saved file.
 const commentsPageLimit = 101
 
 // commentsCapThreshold is the count above which we consider the fetch
 // structurally capped. Threads at-or-below this fit in a single page.
 const commentsCapThreshold = 100
 
-// SavePost downloads a post's full content into the engine's output directory.
-// Returns the directory name actually used (which may include a collision
-// suffix) and whether the comments fetch hit Boosty's structural cap (for
-// state-side bookkeeping) so the caller can record both in state.
+// SavePost downloads a post's full content into the engine's output directory
+// using the engine's Config for --md / --comments. Returns the directory name
+// actually used (which may include a collision suffix) and whether the
+// comments fetch hit Boosty's structural cap, so a caller can record both in
+// state.
 //
-// A non-nil error means at least one required artifact (post.json, media,
+// A non-nil error means at least one required artefact (post.json, media,
 // post.md when WithMD, comments.json when WithComments) could not be written
 // or downloaded. The caller MUST NOT record the post as downloaded in state
 // on error — that is what makes the next sync re-attempt the failed pieces
 // instead of silently leaving stale/missing files behind.
 //
-// External video failures are NOT fatal: DownloadExternal is opt-in and
-// depends on third-party sites that fail in routine ways (geo-blocks, age
-// gates, dead links). They are logged and ignored for the state contract.
+// Existing non-empty media files are skipped unless the post.json already in
+// the directory carries a different updatedAt — the post was edited since
+// that copy was saved, so media at the same slot may have been swapped and
+// every item is re-downloaded over its old copy.
 //
 // SavePost does not refresh signed video URLs on its own — callers that
-// receive posts from the list endpoint (DownloadAll worker, applyNew) must
-// hoist the refresh via MaybeRefreshSignedURLs before calling SavePost, so
-// the same fresh *Post is used for post.json, the download, and the state
-// entry. Callers that already fetched the per-post endpoint (cmd/download
-// --url) pass that fresh post through directly.
+// receive posts from the list endpoint must hoist the refresh via
+// MaybeRefreshSignedURLs before calling SavePost, so the same fresh *Post is
+// used for post.json, the download, and the state entry. Callers that
+// already fetched the per-post endpoint (cmd/download --url) pass that fresh
+// post through directly.
 //
 // Contract: when err is nil, dirName is "" iff the post was inaccessible —
 // every accessible post returns a non-empty name on success. On error,
-// dirName may be empty (failures before the directory was created: MkdirAll,
-// post.json write) or non-empty (artefact failures after); callers must
-// check err before relying on dirName.
+// dirName may be empty (failures before the directory was created) or
+// non-empty (artefact failures after); callers must check err first.
 func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err error) {
+	name := parser.FormatDirName(e.cfg.DirFormat, post.Title, post.PublishTime, post.ID)
+	dirName, out, err := e.savePost(post, name, e.cfg.WithMD, e.cfg.WithComments, 0)
+	return dirName, out.CommentsCapped, err
+}
+
+// savePost is SavePost with the directory name, artefact flags and the
+// caller's record of the post supplied explicitly: saveNewPost takes them
+// from a prior state entry, SavePost from Config (and has no record).
+//
+// savedUpdatedAt is the updatedAt of the last copy whose media fully landed
+// (state.PostEntry.UpdatedAt); 0 means unknown and the on-disk post.json
+// stands in. State must win over disk: runApplyActions writes post.json
+// before media, so after an edit whose media replacement failed, disk
+// already carries the new updatedAt next to the old bytes, and trusting it
+// would keep them and then advance state past them on the retry.
+func (e *Engine) savePost(post *boosty.Post, dirName string, withMD, withComments bool, savedUpdatedAt int64) (string, applyOutcome, error) {
 	if !post.HasAccess {
 		e.c.Log.Printf("  skipping (no access): %s", post.Title)
-		return "", false, nil
+		return "", applyOutcome{}, nil
 	}
 
-	blogDir := filepath.Join(e.cfg.OutputDir, e.cfg.Blog)
-	dirName = parser.FormatDirName(e.cfg.DirFormat, post.Title, post.PublishTime, post.ID)
+	blogDir := e.blogDir()
 	dirName = e.res.reserve(blogDir, post.ID, dirName)
 	dir := filepath.Join(blogDir, dirName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", false, err
+		return "", applyOutcome{}, err
 	}
 
-	if err := writeJSON(filepath.Join(dir, "post.json"), post); err != nil {
-		return "", false, err
+	// A copy saved against a different updatedAt may hold media that the
+	// edit replaced at the same filename, which the skip-existing check
+	// would keep.
+	prev, known := savedUpdatedAt, savedUpdatedAt != 0
+	if !known {
+		prev, known = readPostUpdatedAt(dir)
 	}
-	e.c.Log.Printf("  saved post.json: %s", post.Title)
-
-	parsed := e.parsePostContent(post)
-
-	// Download media. Errors are joined and returned so the caller can refuse
-	// to mark the post as downloaded in state.
-	var errs []error
-	if err := downloader.DownloadMedia(e.c, parsed.Media, dir); err != nil {
-		errs = append(errs, fmt.Errorf("media: %w", err))
-	}
-
-	// External videos: opt-in and best-effort, only logged.
-	if e.cfg.DownloadExternal {
-		if err := downloader.DownloadExternal(e.c.Log, parsed.Media, dir); err != nil {
-			e.c.Log.Printf("  warning: external download error: %v", err)
-		}
+	mode := downloader.KeepExisting
+	if known && prev != post.UpdatedAt {
+		e.c.Log.Printf("  post edited since last save; re-downloading media: %s", post.Title)
+		mode = downloader.ReplaceAll
 	}
 
-	if e.cfg.WithMD {
-		if err := writePostMarkdown(post, parsed, dir); err != nil {
-			errs = append(errs, fmt.Errorf("post.md: %w", err))
-		} else {
-			e.c.Log.Printf("  saved post.md")
-		}
-	}
+	out, err := e.runApplyActions(dir, post, mode, applyActions{
+		Post:     true,
+		Media:    true,
+		MD:       withMD,
+		Comments: withComments,
+	})
+	return dirName, out, err
+}
 
-	if e.cfg.WithComments {
-		cappedFetch, err := e.downloadComments(post.ID, dir, post.Count.Comments)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("comments: %w", err))
-		} else {
-			capped = cappedFetch
-		}
+// readPostUpdatedAt returns the updatedAt recorded in dir/post.json. ok=false
+// when the file is missing, unreadable, or not a post payload.
+func readPostUpdatedAt(dir string) (int64, bool) {
+	data, err := os.ReadFile(filepath.Join(dir, "post.json"))
+	if err != nil {
+		return 0, false
 	}
-
-	if len(errs) > 0 {
-		return dirName, capped, errors.Join(errs...)
+	var p struct {
+		UpdatedAt int64 `json:"updatedAt"`
 	}
-	return dirName, capped, nil
+	if err := json.Unmarshal(data, &p); err != nil {
+		return 0, false
+	}
+	return p.UpdatedAt, true
 }
 
 // parsePostContent parses a post's content blocks, attaches the post-level
 // signedQuery to attachment (audio/file) URLs — the API serves those unsigned,
 // unlike image/video URLs — and logs the content warnings that must never be
-// silent (videos with no MP4 variant, unknown block types). Shared by
-// SavePost and runApplyActions so the signed-query step and the warnings
-// cannot drift between the fresh-download and the update paths.
+// silent (videos with no MP4 variant, unknown block types).
 func (e *Engine) parsePostContent(post *boosty.Post) parser.ParsedContent {
 	parsed := parser.ParseBlocks(post.Data)
 	parser.ApplySignedQuery(parsed.Media, post.SignedQuery)
@@ -147,10 +151,10 @@ func (e *Engine) parsePostContent(post *boosty.Post) parser.ParsedContent {
 // Falls back to the input *Post on any failure:
 //   - GET error: log warn and keep the input (the download retry path will
 //     surface a real error if URLs are dead);
-//   - per-post endpoint returns a stub (HasAccess=false or empty Data) —
-//     subscription lapsed between list-call and per-post call. Keeping the
-//     input avoids writing a degraded post.json + zero-length post.md that
-//     a follow-up sync would re-classify as JustLocked.
+//   - per-post endpoint returns a stub (Post.IsStub) — subscription lapsed
+//     between list-call and per-post call. Keeping the input avoids writing
+//     a degraded post.json + zero-length post.md that a follow-up sync would
+//     re-classify as JustLocked.
 //
 // Caller passes the result back into SavePost / state.Add, so post.json,
 // the downloaded bytes, and the state entry all reflect the same payload.
@@ -163,7 +167,7 @@ func (e *Engine) MaybeRefreshSignedURLs(post *boosty.Post) *boosty.Post {
 		e.c.Log.Printf("  warning: refresh signed video URLs failed for %s: %v", post.ID, err)
 		return post
 	}
-	if !fresh.HasAccess || len(fresh.Data) == 0 {
+	if fresh.IsStub() {
 		e.c.Log.Printf("  warning: per-post fetch for %s returned no-access/empty stub; using list-endpoint copy", post.ID)
 		return post
 	}
@@ -174,19 +178,14 @@ func (e *Engine) MaybeRefreshSignedURLs(post *boosty.Post) *boosty.Post {
 // the fetch hit Boosty's structural per-post limit (more than
 // commentsCapThreshold top-level items in the single page the endpoint
 // serves, or a thread that inlined fewer live replies than its ReplyCount)
-// so the caller can mark state to stop re-triggering NewComments against an
-// API count the server will never let us reach. expectedCount is
+// so the caller can mark state accordingly. expectedCount is
 // post.Count.Comments at fetch time — used only for the warning, not for
 // disk accounting.
 func (e *Engine) downloadComments(postID, dir string, expectedCount int) (capped bool, err error) {
-	var allComments []boosty.Comment
-	for comment, err := range e.c.FetchComments(e.cfg.Blog, postID, commentsPageLimit) {
-		if err != nil {
-			return false, err
-		}
-		allComments = append(allComments, comment)
+	allComments, err := e.c.FetchComments(e.cfg.Blog, postID, commentsPageLimit)
+	if err != nil {
+		return false, err
 	}
-
 	if err := writeJSON(filepath.Join(dir, "comments.json"), allComments); err != nil {
 		return false, err
 	}
@@ -209,30 +208,6 @@ func (e *Engine) downloadComments(postID, dir string, expectedCount int) (capped
 	}
 	e.c.Log.Printf("  saved comments.json (%d comments)", diskCount)
 	return capped, nil
-}
-
-// postStateEntry builds a state.PostEntry from a post for the initial
-// NEW save path. HasComments / HasMd reflect the engine's current Config
-// flags. JustUnlocked and the Edited / VideoMismatch / Missing apply path
-// do NOT use this helper — they patch an existing entry in place via
-// buildSyncEntry so that failed writes do not advance UpdatedAt /
-// CommentsCount past disk reality, and HasMd / HasComments survive a
-// sync without the corresponding flag.
-func (e *Engine) postStateEntry(post *boosty.Post, dirName string) state.PostEntry {
-	tier := ""
-	if post.SubscriptionLevel != nil {
-		tier = post.SubscriptionLevel.Name
-	}
-	return state.PostEntry{
-		Title:         post.Title,
-		DirName:       dirName,
-		UpdatedAt:     post.UpdatedAt,
-		CommentsCount: post.Count.Comments,
-		Price:         post.Price,
-		Tier:          tier,
-		HasComments:   e.cfg.WithComments,
-		HasMd:         e.cfg.WithMD,
-	}
 }
 
 // writeJSON marshals v with indent and writes it to path (0644) atomically.

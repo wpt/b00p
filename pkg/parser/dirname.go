@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // DefaultFormat is the default directory name format for downloaded posts.
@@ -108,12 +109,30 @@ func FormatDate(t time.Time, format string) string {
 	return b.String()
 }
 
-// SanitizeTitle cleans a post title for use as a directory name and caps it at
-// 80 runes so a single placeholder cannot dominate the path.
+// Title length caps. maxTitleRunes keeps names readable; maxTitleBytes keeps
+// the full directory name under Linux NAME_MAX (255 bytes) once the {date}_
+// prefix (11 bytes) and the dirReserver collision suffix (up to 37 bytes)
+// are added — 80 CJK or emoji runes alone are 240-320 bytes. Windows counts
+// UTF-16 units, which a 200-byte UTF-8 name never exceeds.
+const (
+	maxTitleRunes = 80
+	maxTitleBytes = 200
+)
+
+// SanitizeTitle cleans a post title for use as a directory name and caps it
+// at maxTitleRunes runes / maxTitleBytes bytes, whichever is hit first.
 func SanitizeTitle(title string) string {
 	s := sanitizeNameChars(title)
-	if len([]rune(s)) > 80 {
-		s = string([]rune(s)[:80])
+	truncated := false
+	if len([]rune(s)) > maxTitleRunes {
+		s = string([]rune(s)[:maxTitleRunes])
+		truncated = true
+	}
+	if len(s) > maxTitleBytes {
+		s = truncateBytes(s, maxTitleBytes)
+		truncated = true
+	}
+	if truncated {
 		s = strings.TrimRightFunc(s, func(r rune) bool {
 			return unicode.IsSpace(r) || r == '-' || r == '_'
 		})
@@ -121,9 +140,35 @@ func SanitizeTitle(title string) string {
 	return s
 }
 
+// truncateBytes cuts s to at most n bytes on a rune boundary.
+func truncateBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// ValidateFormat rejects a --format string that references a placeholder
+// FormatDirName does not implement. Unknown placeholders would otherwise pass
+// through literally ("{tittle}" for every post), and the resulting names are
+// pinned in state on the first run.
+func ValidateFormat(format string) error {
+	for _, m := range placeholderRe.FindAllStringSubmatch(format, -1) {
+		switch m[1] {
+		case "date", "title", "id":
+		default:
+			return fmt.Errorf("unknown placeholder %s (supported: {date}, {date:FORMAT}, {title}, {id})", m[0])
+		}
+	}
+	return nil
+}
+
 // sanitizeNameChars strips FS-unsafe and control characters and collapses
-// whitespace, with NO length cap. SanitizeTitle layers the 80-rune cap on top
-// for the {title} placeholder; FormatDirName applies this to the whole
+// whitespace, with NO length cap. SanitizeTitle layers the length caps on
+// top for the {title} placeholder; FormatDirName applies this to the whole
 // formatted result so separators from a {date:FORMAT} literal cannot create
 // nested paths, while leaving the length budget to {title}.
 func sanitizeNameChars(s string) string {

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestFormatDate(t *testing.T) {
@@ -71,6 +72,55 @@ func TestSanitizeTitle_LongTitle(t *testing.T) {
 	got := SanitizeTitle(long)
 	if len([]rune(got)) > 80 {
 		t.Errorf("SanitizeTitle(100 chars) = %d runes, want <= 80", len([]rune(got)))
+	}
+}
+
+// 80 CJK runes are 240 bytes; with the {date}_ prefix and a collision suffix
+// that passes Linux NAME_MAX (255 bytes). The byte cap must cut on a rune
+// boundary so the name stays valid UTF-8.
+func TestSanitizeTitle_ByteCap(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		title string
+	}{
+		{"cjk", strings.Repeat("字", 80)},
+		{"emoji", strings.Repeat("🙂", 80)},
+		{"mixed", strings.Repeat("a字", 60)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeTitle(tc.title)
+			if len(got) > maxTitleBytes {
+				t.Errorf("len = %d bytes, want <= %d", len(got), maxTitleBytes)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("result is not valid UTF-8: %q", got)
+			}
+			if got == "" {
+				t.Error("result is empty")
+			}
+		})
+	}
+	short := strings.Repeat("я", 80) // 160 bytes: rune cap applies, byte cap does not
+	if got := SanitizeTitle(short); got != short {
+		t.Errorf("80 two-byte runes must survive intact, got %d runes", len([]rune(got)))
+	}
+}
+
+func TestValidateFormat(t *testing.T) {
+	for _, ok := range []string{DefaultFormat, "{date:ymd}_{title}", "{id}", "plain", "{date}-{id}-{title}"} {
+		if err := ValidateFormat(ok); err != nil {
+			t.Errorf("ValidateFormat(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"{tittle}", "{date}_{titel}", "{ID}"} {
+		err := ValidateFormat(bad)
+		if err == nil {
+			t.Errorf("ValidateFormat(%q) = nil, want error", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "{") {
+			t.Errorf("ValidateFormat(%q) = %v, want the offending placeholder named", bad, err)
+		}
 	}
 }
 

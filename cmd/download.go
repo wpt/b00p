@@ -143,6 +143,9 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	if numWorkers < 1 {
 		return fmt.Errorf("--workers must be >= 1")
 	}
+	if err := parser.ValidateFormat(dirFormat); err != nil {
+		return fmt.Errorf("invalid --format %q: %v", dirFormat, err)
+	}
 
 	// Flag-combination guards: silently no-op flags train the user to add
 	// them defensively without understanding what they do. Fail loud.
@@ -213,12 +216,7 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		if err := c.GetJSON(boosty.PostURL(urlBlog, urlPostID), &post); err != nil {
 			return fmt.Errorf("fetch post: %w", err)
 		}
-		// Stub guard: per-post endpoint may return a degraded payload (no
-		// access, empty Data) when the post is locked or the subscription
-		// lapsed. SavePost would otherwise write an empty post.json + zero-
-		// length post.md against a stub. Same guard as fetchFullPost and
-		// MaybeRefreshSignedURLs apply on the sync path.
-		if !post.HasAccess || len(post.Data) == 0 {
+		if post.IsStub() {
 			return fmt.Errorf("post %s not accessible (locked, deleted, or subscription lapsed)", urlPostID)
 		}
 		_, _, err := syncer.New(c, buildConfig(urlBlog)).SavePost(&post)

@@ -17,13 +17,13 @@ import (
 	"time"
 )
 
-// ErrFetchPage marks an iterator-level failure in FetchPosts / FetchComments:
-// the whole page request failed (transport, 5xx after retries, refresh
-// rejected, etc.) and the iteration terminates. Distinct from a per-post
-// json.Unmarshal failure inside a successful page, which the iterators
-// recover from by yielding (Zero, parseErr) and continuing to the next item.
-// Consumers use errors.Is(err, ErrFetchPage) to decide whether to abort the
-// whole sync (page error) vs. skip the offending item (parse error).
+// ErrFetchPage marks a page-level failure in FetchPosts: the whole page
+// request failed (transport, 5xx after retries, refresh rejected, etc.) and
+// the iteration terminates. Distinct from a per-post json.Unmarshal failure
+// inside a successful page, which the iterator recovers from by yielding
+// (Post{}, parseErr) and continuing to the next item. Consumers use
+// errors.Is(err, ErrFetchPage) to decide whether to abort the whole sync
+// (page error) vs. skip the offending item (parse error).
 var ErrFetchPage = errors.New("page fetch failed")
 
 // ErrTokenSaveFailed marks a refresh that succeeded in memory but could not
@@ -32,7 +32,12 @@ var ErrFetchPage = errors.New("page fetch failed")
 var ErrTokenSaveFailed = errors.New("token refresh succeeded but saving auth file failed")
 
 const (
-	BaseURL   = "https://api.boosty.to"
+	// BaseURL is the Boosty API origin every URL builder in urls.go prefixes.
+	BaseURL = "https://api.boosty.to"
+
+	// UserAgent is sent on every API and media request. okcdn signed URLs are
+	// bound to the UA that obtained them (srcAg=...), so the same string must
+	// be used for both the post fetch and the download.
 	UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
 )
 
@@ -48,9 +53,8 @@ var RetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.S
 //
 // HTTP carries a 60s timeout suitable for API calls; DownloadHTTP has no
 // timeout because media downloads can legitimately take many minutes for
-// gigabyte-scale videos. Both clients are reused across requests to share
-// the connection pool — earlier code allocated a fresh *http.Client per
-// download, defeating keep-alive.
+// gigabyte-scale videos. Both clients are reused across requests so the
+// connection pool (keep-alive) is shared.
 //
 // tokensMu guards reads/writes of *Tokens fields against concurrent refresh
 // from worker goroutines (--workers > 1). All access goes through
@@ -118,10 +122,11 @@ func NewClient(tokens *Tokens, authPath string) *Client {
 
 // waitRetry logs and sleeps before retry attempt N (1-based, in range
 // [1, len(RetryDelays)]). The label prefixes the log line (e.g. "retry" or
-// "download retry").
-func (c *Client) waitRetry(label string, attempt int) {
+// "download retry"); cause is the transient error being retried — without it
+// a flaky link that recovers on retry leaves no trace of what went wrong.
+func (c *Client) waitRetry(label string, attempt int, cause error) {
 	delay := RetryDelays[attempt-1]
-	c.Log.Printf("  %s %d/%d in %s...", label, attempt, len(RetryDelays), delay)
+	c.Log.Printf("  %s %d/%d in %s: %v", label, attempt, len(RetryDelays), delay, cause)
 	time.Sleep(delay)
 }
 
@@ -135,7 +140,7 @@ func (c *Client) GetJSON(url string, out any) error {
 	var lastErr error
 	for attempt := 0; attempt <= len(RetryDelays); attempt++ {
 		if attempt > 0 {
-			c.waitRetry("retry", attempt)
+			c.waitRetry("retry", attempt, lastErr)
 		}
 
 		resp, err := c.doRequest("GET", url)
@@ -301,31 +306,19 @@ func (c *Client) FetchPosts(blog string, limit int) iter.Seq2[Post, error] {
 	}
 }
 
-// FetchComments returns an iterator over a single page of top-level comments
-// on a post (replies are inlined per item up to defaultReplyLimit=100).
+// FetchComments returns the single page of top-level comments the endpoint
+// serves for a post (replies are inlined per item up to defaultReplyLimit).
 //
 // The Boosty comments endpoint ignores `offset>0` (returns data=[] with
-// isLast=true even when more pages exist), so pagination beyond the first
-// page does not actually work — pass a `limit` value that covers every
-// top-level thread in one call. The CLI uses limit=101 with cap detection;
-// library callers should size `limit` similarly (>= post.Count.Comments
-// expected top-level threads) and treat the result as "what fit in the
-// first page". A returned page of exactly `limit` items hints that the
-// post may have more threads than the call could retrieve.
-func (c *Client) FetchComments(blog, postID string, limit int) iter.Seq2[Comment, error] {
-	return func(yield func(Comment, error) bool) {
-		// Single GET, no pagination loop: the server ignores offset>0 (see
-		// doc comment), so a second request can never yield anything — the
-		// first page IS the result.
-		var resp CommentsResponse
-		if err := c.GetJSON(CommentsURL(blog, postID, limit, 0), &resp); err != nil {
-			yield(Comment{}, fmt.Errorf("%w: %w", ErrFetchPage, err))
-			return
-		}
-		for _, comment := range resp.Data {
-			if !yield(comment, nil) {
-				return
-			}
-		}
+// isLast=true even when more pages exist), so there is no pagination — pass
+// a `limit` that covers every top-level thread in one call. The CLI uses
+// limit=101 with cap detection; library callers should size `limit`
+// similarly (>= the expected number of top-level threads) and treat a page
+// of exactly `limit` items as a hint that the post has more.
+func (c *Client) FetchComments(blog, postID string, limit int) ([]Comment, error) {
+	var resp CommentsResponse
+	if err := c.GetJSON(CommentsURL(blog, postID, limit), &resp); err != nil {
+		return nil, err
 	}
+	return resp.Data, nil
 }

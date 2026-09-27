@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -30,14 +31,7 @@ const ytdlpTimeout = 20 * time.Minute
 // Returns nil if there are no external videos in media — yt-dlp is only
 // required when there is something to download.
 func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) error {
-	hasExternal := false
-	for _, m := range media {
-		if m.Type == "external_video" {
-			hasExternal = true
-			break
-		}
-	}
-	if !hasExternal {
+	if !slices.ContainsFunc(media, func(m parser.MediaItem) bool { return m.Type == "external_video" }) {
 		return nil
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {

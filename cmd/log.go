@@ -17,9 +17,8 @@ import (
 // multi-GB video download.
 //
 // All methods take the mutex so concurrent workers (--workers > 1) cannot
-// interleave Progress writes with Printf lines, and so hasProgress is read
-// and mutated under a lock — the previous version mutated it from worker
-// goroutines without synchronization.
+// interleave Progress writes with Printf lines, and so hasProgress is never
+// read or mutated from two goroutines at once.
 type stdLogger struct {
 	mu          sync.Mutex
 	hasProgress bool

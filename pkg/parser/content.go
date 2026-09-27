@@ -18,6 +18,11 @@ type MediaItem struct {
 	Type     string // "image", "video", "external_video", "audio", "file"
 	URL      string
 	Filename string
+	// ID is the Boosty block id of the media object. Stable across API
+	// fetches while the signed URL is not, so downloads key their resume
+	// sidecar on it (boosty.DownloadRequest.Key). Empty when the block had
+	// no id.
+	ID string
 	// Title is the author-supplied display name for audio/file attachments
 	// (the original filename as uploaded); used as the link label in
 	// generated markdown. Empty for other media types.
@@ -131,6 +136,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 				Type:     "image",
 				URL:      imgURL,
 				Filename: filename,
+				ID:       block.ID,
 			})
 
 		case "ok_video":
@@ -146,6 +152,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 				Type:     "video",
 				URL:      vidURL,
 				Filename: filename,
+				ID:       block.ID,
 			})
 
 		case "video":
@@ -170,6 +177,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 				URL:      block.URL,
 				Title:    block.Title,
 				Filename: fmt.Sprintf("audio_%03d%s", audIdx, attachmentExt(block.Title, block.URL, ".mp3")),
+				ID:       block.ID,
 			})
 
 		case "file":
@@ -183,6 +191,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 				URL:      block.URL,
 				Title:    block.Title,
 				Filename: fmt.Sprintf("file_%03d%s", fileIdx, attachmentExt(block.Title, block.URL, "")),
+				ID:       block.ID,
 			})
 
 		case "link":
@@ -212,10 +221,10 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 }
 
 // imageExt picks an extension for a downloaded image. Boosty image URLs are
-// signed, so naive path.Ext("...png?sig=...") returns ".png?sig=..." and the
-// previous code fell back to ".jpg" for every signed URL. Strip query/fragment
-// first, then accept only the formats Boosty's CDN actually serves; anything
-// else (missing, query-polluted, or an FS-unsafe extension) falls back to ".jpg".
+// signed, so a naive path.Ext("...png?sig=...") returns ".png?sig=..." and
+// every signed image would land as .jpg. Strip query/fragment first, then
+// accept only the formats Boosty's CDN actually serves; anything else
+// (missing, query-polluted, or an FS-unsafe extension) falls back to ".jpg".
 func imageExt(s string) string {
 	switch ext := urlPathExt(s); ext {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif":

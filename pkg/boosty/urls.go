@@ -8,6 +8,10 @@ import (
 // API URL builders. Exported so library callers can combine them with
 // Client.GetJSON for endpoints not covered by a typed iterator.
 
+// DefaultPageLimit is the page size the CLI passes to FetchPosts. Listing is
+// serial, so a 2000-post blog costs 100 round trips per run at this size.
+const DefaultPageLimit = 20
+
 // PostsURL returns the URL for listing blog posts.
 // The offset is opaque server-supplied data which can contain `+`, `=`, `&`,
 // or `%` and so must be query-escaped before being concatenated into the URL.
@@ -32,16 +36,16 @@ func PostURL(blogName, postID string) string {
 // MORE than 100 replies trip the per-thread cap detection in
 // syncer.downloadComments which marks the post with state.CommentsCapped;
 // classifyPost then suppresses the catch-up refetch (disk count cannot
-// reach API count via this endpoint). See pkg/syncer/save.go and
-// pkg/syncer/classify.go for the suppression contract.
+// reach API count via this endpoint).
 const defaultReplyLimit = 100
 
 // CommentsURL returns the URL for post comments. reply_limit is set to
 // defaultReplyLimit to force the server to inline replies; see the constant
-// for why.
-func CommentsURL(blogName, postID string, limit, offset int) string {
-	return fmt.Sprintf("%s/v1/blog/%s/post/%s/comment/?limit=%d&offset=%d&reply_limit=%d",
-		BaseURL, blogName, postID, limit, offset, defaultReplyLimit)
+// for why. There is no offset parameter: the endpoint ignores it (see
+// Client.FetchComments).
+func CommentsURL(blogName, postID string, limit int) string {
+	return fmt.Sprintf("%s/v1/blog/%s/post/%s/comment/?limit=%d&reply_limit=%d",
+		BaseURL, blogName, postID, limit, defaultReplyLimit)
 }
 
 // UserSubscriptionsURL returns the URL for the current user's subscriptions.

@@ -35,16 +35,13 @@ type PostEntry struct {
 	HasComments   bool    `json:"hasComments"`
 	HasMd         bool    `json:"hasMd"`
 	// CommentsCapped records that this post hit the comments-fetch ceiling
-	// the last time it was saved. The ceiling is our choice forced by a
-	// broken offset query param on Boosty's comments endpoint (offset>0
-	// returns data=[] with isLast=true), so we cannot paginate past the
-	// first page and we cap at commentsPageLimit-1 top-level threads or
-	// defaultReplyLimit inlined replies per thread — see
-	// pkg/syncer/save.go commentsPageLimit and pkg/boosty/client.go
-	// defaultReplyLimit. Without this flag, classifyPost would re-fire
-	// NewComments on every sync forever because disk count can never catch
-	// up to API count. With it, classify skips the disk<API trigger
-	// (suppression is one-directional — see pkg/syncer/classify.go).
+	// the last time it was saved: more than commentsPageLimit-1 top-level
+	// threads (pkg/syncer/save.go) or more than defaultReplyLimit replies in
+	// one thread (pkg/boosty/urls.go). Boosty's comments endpoint ignores
+	// offset, so the disk count can never reach the API count for such a
+	// post; classifyPost compares CommentsCount (the API count at last
+	// fetch) instead of the disk count for capped posts, so a refetch fires
+	// once per API-side change and then goes quiet.
 	CommentsCapped bool `json:"commentsCapped,omitempty"`
 }
 
@@ -102,6 +99,23 @@ func Load(dir string) (*State, error) {
 		s.Posts = make(map[string]PostEntry)
 	}
 	return s, nil
+}
+
+// DropEmptyDirNames removes every entry whose DirName is empty and returns
+// their IDs. filepath.Join(blogDir, "") is blogDir, so such an entry (written
+// by builds that predate the write-side guard in the syncer) would aim every
+// per-post read and write at the blog root. Dropping it makes the post
+// re-classify as new; files already on disk are skipped by the download
+// integrity check.
+func (s *State) DropEmptyDirNames() []string {
+	var dropped []string
+	for id, e := range s.Posts {
+		if e.DirName == "" {
+			delete(s.Posts, id)
+			dropped = append(dropped, id)
+		}
+	}
+	return dropped
 }
 
 // Has reports whether a post ID exists in the state.

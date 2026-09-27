@@ -194,6 +194,22 @@ func TestBoostyURLRe(t *testing.T) {
 	}
 }
 
+// An unknown --format placeholder used to pass through literally, naming
+// every post's directory "{tittle}" with collision suffixes and pinning the
+// names in state.
+func TestRunDownload_RejectsUnknownFormatPlaceholder(t *testing.T) {
+	oldURL, oldBlog, oldFormat := postURL, blogName, dirFormat
+	t.Cleanup(func() { postURL, blogName, dirFormat = oldURL, oldBlog, oldFormat })
+	postURL = ""
+	blogName = "someblog"
+	dirFormat = "{date}_{tittle}"
+
+	err := runDownload(downloadCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid --format") || !strings.Contains(err.Error(), "{tittle}") {
+		t.Fatalf("runDownload(--format with typo) = %v, want invalid-format rejection naming {tittle}", err)
+	}
+}
+
 // The --url capture admits ".." and runDownload's validateBlogName call is
 // the only guard before filepath.Join — deleting or reordering it must fail here.
 func TestRunDownload_ValidatesURLBlog(t *testing.T) {

@@ -2,10 +2,10 @@ package syncer
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -127,12 +127,7 @@ func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) string {
 
 // hasOkVideo reports whether any block is a native (ok_video) video.
 func hasOkVideo(blocks []boosty.ContentBlock) bool {
-	for _, b := range blocks {
-		if b.Type == "ok_video" {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(blocks, func(b boosty.ContentBlock) bool { return b.Type == "ok_video" })
 }
 
 // hasSignedMedia reports whether the post carries content whose download
@@ -141,34 +136,29 @@ func hasOkVideo(blocks []boosty.ContentBlock) bool {
 // (post-level signedQuery). Gates MaybeRefreshSignedURLs; checkVideoSizes
 // keeps using hasOkVideo because it validates videos only.
 func hasSignedMedia(blocks []boosty.ContentBlock) bool {
-	for _, b := range blocks {
-		switch b.Type {
-		case "ok_video", "audio_file", "file":
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(blocks, func(b boosty.ContentBlock) bool {
+		return b.Type == "ok_video" || b.Type == "audio_file" || b.Type == "file"
+	})
 }
 
 // checkRemoteVideoSize compares local file size with the server's Content-Length
 // obtained via HEAD. The okcdn signed URLs bind to the UA used to fetch them, so
 // we must reuse the client's User-Agent.
 //
-// No Bearer auth is set: okcdn relies on URL signing (srcAg=... + token in the
-// path), not Authorization headers — same model as downloadOnce in
-// pkg/boosty/client.go. Adding Bearer would not break anything but would muddy
-// the contract; matching downloadOnce keeps both paths honest about how okcdn
-// is authenticated.
+// No Bearer auth is set: okcdn relies on URL signing (srcAg=... and sig=...
+// in the query), not Authorization headers — same model as downloadOnce in
+// pkg/boosty/download.go.
 //
 // httpc is c.HTTP (60s timeout). HEAD returns only headers — no body transfer
 // — so 60s is generous even for gigabyte videos on slow links; c.DownloadHTTP
 // (no timeout) is reserved for actual body streaming where a stuck connection
 // must not block forever on a request that legitimately takes minutes.
 //
-// Returns a descriptive issue string on real mismatches (missing local, non-200,
-// size differs). Transient problems (network error, missing Content-Length) are
-// logged and return empty — they are not treated as mismatches to avoid flagging
-// every post when the network is flaky.
+// Returns a descriptive issue string only on verdicts about the local file
+// (missing, size differs from a 200 with Content-Length). Everything else —
+// network error, non-200 status, missing Content-Length — is logged and
+// returns empty: a 403/405/5xx says nothing about the bytes on disk, and a
+// mismatch verdict makes the apply phase re-download the video.
 func checkRemoteVideoSize(httpc *http.Client, ua string, log boosty.Logger,
 	url, localPath, filename string) string {
 	localInfo, err := os.Stat(localPath)
@@ -188,16 +178,11 @@ func checkRemoteVideoSize(httpc *http.Client, ua string, log boosty.Logger,
 		log.Printf("  check-media %s: HEAD error: %v", filename, boosty.RedactURLError(err))
 		return ""
 	}
-	defer func() {
-		// Drain body before close so the connection can return to the pool;
-		// HEAD bodies are empty but Go's HTTP semantics still require this
-		// to signal reuse intent, otherwise the pool leaks under --workers > 1.
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-	}()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Sprintf("%s: HEAD %d", filename, resp.StatusCode)
+		log.Printf("  check-media %s: HEAD %d; skipping size check", filename, resp.StatusCode)
+		return ""
 	}
 	if resp.ContentLength <= 0 {
 		log.Printf("  check-media %s: no Content-Length", filename)

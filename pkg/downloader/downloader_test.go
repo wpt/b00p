@@ -62,7 +62,7 @@ func TestDownloadMedia_NilOnEmpty(t *testing.T) {
 	c := newTestClient(server, log)
 
 	dir := t.TempDir()
-	err := DownloadMedia(c, nil, dir)
+	err := DownloadMedia(c, nil, dir, KeepExisting)
 	if err != nil {
 		t.Fatalf("DownloadMedia with no media: %v, want nil", err)
 	}
@@ -87,7 +87,7 @@ func TestDownloadMedia_SkipsExternalVideos(t *testing.T) {
 		{Type: "external_video", URL: "https://vk.com/video123", Filename: "ext2"},
 	}
 	dir := t.TempDir()
-	err := DownloadMedia(c, media, dir)
+	err := DownloadMedia(c, media, dir, KeepExisting)
 	if err != nil {
 		t.Fatalf("DownloadMedia: %v, want nil", err)
 	}
@@ -120,7 +120,7 @@ func TestDownloadMedia_Success(t *testing.T) {
 		{Type: "image", URL: server.URL + "/a.jpg", Filename: "a.jpg"},
 		{Type: "image", URL: server.URL + "/b.jpg", Filename: "b.jpg"},
 	}
-	if err := DownloadMedia(c, media, dir); err != nil {
+	if err := DownloadMedia(c, media, dir, KeepExisting); err != nil {
 		t.Fatalf("DownloadMedia: %v, want nil", err)
 	}
 
@@ -167,7 +167,7 @@ func TestDownloadMedia_MixedSuccessAndFailure(t *testing.T) {
 		{Type: "image", URL: server.URL + "/bad1.jpg", Filename: "bad1.jpg"},
 		{Type: "image", URL: server.URL + "/bad2.jpg", Filename: "bad2.jpg"},
 	}
-	err := DownloadMedia(c, media, dir)
+	err := DownloadMedia(c, media, dir, KeepExisting)
 	if err == nil {
 		t.Fatal("DownloadMedia: nil, want non-nil error from failing items")
 	}
@@ -191,6 +191,62 @@ func TestDownloadMedia_MixedSuccessAndFailure(t *testing.T) {
 	}
 }
 
+// ReplaceVideos re-downloads native videos over their existing copies and
+// leaves other media alone; ReplaceAll refreshes everything. KeepExisting
+// (the first-download mode) touches nothing that is already on disk.
+func TestDownloadMedia_ReplaceModes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "new-"+strings.TrimPrefix(r.URL.Path, "/"))
+	}))
+	defer server.Close()
+	c := newTestClient(server, &recordingLogger{})
+
+	media := []parser.MediaItem{
+		{Type: "image", URL: server.URL + "/img", Filename: "image_001.jpg", ID: "i1"},
+		{Type: "video", URL: server.URL + "/vid", Filename: "video_001.mp4", ID: "v1"},
+	}
+	seed := func(t *testing.T) string {
+		dir := t.TempDir()
+		for _, m := range media {
+			if err := os.WriteFile(filepath.Join(dir, m.Filename), []byte("old"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	read := func(t *testing.T, dir, name string) string {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	for _, tc := range []struct {
+		mode       Mode
+		wantImage  string
+		wantVideo  string
+		modeString string
+	}{
+		{KeepExisting, "old", "old", "KeepExisting"},
+		{ReplaceVideos, "old", "new-vid", "ReplaceVideos"},
+		{ReplaceAll, "new-img", "new-vid", "ReplaceAll"},
+	} {
+		t.Run(tc.modeString, func(t *testing.T) {
+			dir := seed(t)
+			if err := DownloadMedia(c, media, dir, tc.mode); err != nil {
+				t.Fatalf("DownloadMedia: %v", err)
+			}
+			if got := read(t, dir, "image_001.jpg"); got != tc.wantImage {
+				t.Errorf("image = %q, want %q", got, tc.wantImage)
+			}
+			if got := read(t, dir, "video_001.mp4"); got != tc.wantVideo {
+				t.Errorf("video = %q, want %q", got, tc.wantVideo)
+			}
+		})
+	}
+}
+
 // TestDownloadMedia_MkdirFailure surfaces the MkdirAll error rather than
 // silently appending to a missing directory. We point dir at a path that
 // can't be created — an existing regular file used as a parent.
@@ -206,7 +262,7 @@ func TestDownloadMedia_MkdirFailure(t *testing.T) {
 	// blocker is a regular file; MkdirAll(blocker/sub) must fail.
 	bad := filepath.Join(blocker, "sub")
 
-	err := DownloadMedia(c, []parser.MediaItem{{Type: "image", URL: "http://example", Filename: "x.jpg"}}, bad)
+	err := DownloadMedia(c, []parser.MediaItem{{Type: "image", URL: "http://example", Filename: "x.jpg"}}, bad, KeepExisting)
 	if err == nil {
 		t.Fatal("DownloadMedia under un-mkdir-able dir: nil, want error")
 	}

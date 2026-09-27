@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"github.com/wpt/b00p/pkg/boosty"
-	"github.com/wpt/b00p/pkg/state"
 )
 
 // Sync compares the blog's API state with on-disk state, displays a diff,
@@ -20,14 +19,9 @@ func (e *Engine) Sync() error {
 	c := e.c
 	c.Log.Printf("Syncing %s...", e.cfg.Blog)
 
-	blogDir := filepath.Join(e.cfg.OutputDir, e.cfg.Blog)
-	if err := os.MkdirAll(blogDir, 0755); err != nil {
-		return err
-	}
-
-	st, err := state.Load(blogDir)
+	blogDir, st, err := e.loadState()
 	if err != nil {
-		return fmt.Errorf("load state: %w", err)
+		return err
 	}
 
 	// Phase 1: Fetch and classify.
@@ -40,7 +34,7 @@ func (e *Engine) Sync() error {
 	//   - any other error: per-post parse failure inside a successful page;
 	//     iterator continues, we log and skip just that item.
 	var items []syncItem
-	for post, err := range c.FetchPosts(e.cfg.Blog, 20) {
+	for post, err := range c.FetchPosts(e.cfg.Blog, boosty.DefaultPageLimit) {
 		if err != nil {
 			if errors.Is(err, boosty.ErrFetchPage) {
 				return fmt.Errorf("fetch posts: %w", err)
@@ -48,7 +42,7 @@ func (e *Engine) Sync() error {
 			c.Log.Printf("  warning: skipping malformed post: %v", err)
 			continue
 		}
-		items = append(items, classifyPost(post, st, blogDir, e.cfg.DirFormat))
+		items = append(items, classifyPost(post, st, blogDir))
 	}
 
 	// Phase 2a: video size check (optional).
@@ -132,15 +126,14 @@ func (e *Engine) Sync() error {
 		c.Log.Printf("  warning: failed to save backfill: %v", err)
 	}
 
-	// Phase 4: apply. Runs through the worker pool so --workers > 1 actually
-	// parallelizes sync (previously only DownloadAll honored the flag). Each
-	// apply helper takes short critical sections around its st.Posts read
-	// and st.Add/st.Save write via e.stMu — the lock is never held across
-	// HTTP downloads or file writes, so parallelism stays effective.
+	// Phase 4: apply through the worker pool. Each apply helper takes short
+	// critical sections around its st.Posts read and st.Add/st.Save write
+	// via e.stMu — the lock is never held across HTTP downloads or artefact
+	// writes, so parallelism stays effective.
 	c.Log.Printf("Applying...")
 	e.failedPosts.Store(0)
 	runWorkerPool(e.cfg.Workers, items, func(item syncItem) {
-		e.applyItem(blogDir, st, item)
+		e.applyItem(st, item)
 	})
 
 	// Index reflects whatever state the apply phase managed to persist —

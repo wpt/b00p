@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/wpt/b00p/pkg/state"
 )
 
 // dirReserver is the only thing standing between two concurrent workers and
@@ -62,6 +64,31 @@ func TestDirReserver_ShortPostIDNotTruncated(t *testing.T) {
 // On-disk post.json is the source of truth for "who already owns this dir":
 // if the id in there matches us, we keep the base name (so a re-run of the
 // same blog reattaches to its own state instead of suffixing every dir).
+// A tracked directory whose post.json is missing reads as free to the disk
+// probe; seeding from state must still keep it for its owner.
+func TestDirReserver_SeedProtectsTrackedDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "shared"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newDirReserver()
+	r.seed(dir, map[string]state.PostEntry{
+		"ownerpost": {DirName: "shared"},
+		"poisoned":  {DirName: ""}, // must be ignored, not reserve ""
+	})
+
+	if got := r.reserve(dir, "bbbbcccc", "shared"); got != "shared_bbbbcccc" {
+		t.Errorf("reserve(other) = %q, want 'shared_bbbbcccc' (seeded owner must win)", got)
+	}
+	if got := r.reserve(dir, "ownerpost", "shared"); got != "shared" {
+		t.Errorf("reserve(owner) = %q, want 'shared'", got)
+	}
+	if _, taken := r.owned[reservationKey(dir, "")]; taken {
+		t.Error("empty DirName was seeded as a reservation")
+	}
+}
+
 func TestDirReserver_DiskOwnedByUsReturnsBase(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "shared")

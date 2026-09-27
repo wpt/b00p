@@ -62,6 +62,18 @@ func TestConfirmApply_EmptyInputDefaultsToNo(t *testing.T) {
 	}
 }
 
+// `printf y | b00p ... --sync` delivers the answer together with io.EOF and
+// no trailing newline; the bytes read decide, not the EOF.
+func TestConfirmApply_NoTrailingNewline(t *testing.T) {
+	log := &recordingLogger{}
+	if !confirmApply(log, bufio.NewReader(strings.NewReader("y")), false) {
+		t.Errorf("confirmApply(input='y' without newline) = false, want true; log=%q", log.joined())
+	}
+	if confirmApply(log, bufio.NewReader(strings.NewReader("n")), false) {
+		t.Error("confirmApply(input='n' without newline) = true, want false")
+	}
+}
+
 func TestConfirmApply_EOFReturnsFalse(t *testing.T) {
 	log := &recordingLogger{}
 	// Empty reader → EOF immediately. Caller treats as cancellation.

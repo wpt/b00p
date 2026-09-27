@@ -33,6 +33,25 @@ type Post struct {
 	SignedQuery       string             `json:"signedQuery"`
 }
 
+// IsStub reports whether the per-post endpoint returned a degraded payload:
+// no access, or an empty block list. Both happen when the subscription
+// lapsed (or the post was locked server-side) between a list call and the
+// per-post call. Callers must not write such a payload over an existing
+// post.json — parsing empty Data into empty media would tick every artefact
+// channel OK and advance state against a corrupted copy.
+func (p *Post) IsStub() bool {
+	return !p.HasAccess || len(p.Data) == 0
+}
+
+// TierName returns the subscription tier name required for the post, or ""
+// when the post carries no tier (free post, or the field is absent).
+func (p *Post) TierName() string {
+	if p.SubscriptionLevel == nil {
+		return ""
+	}
+	return p.SubscriptionLevel.Name
+}
+
 // PostSubLevel is the minimum subscription tier required to access a post.
 type PostSubLevel struct {
 	ID             int64              `json:"id"`

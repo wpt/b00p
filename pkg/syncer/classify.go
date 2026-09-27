@@ -8,16 +8,14 @@ import (
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
-	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/state"
 )
 
 // syncItem is a per-post classification with independent flags. A single
-// post can carry multiple flags simultaneously (e.g. edited AND comments
-// changed AND video size mismatch) — the previous implementation used a
-// single-action enum and silently dropped combined changes. The apply phase
-// dispatches on each flag independently and re-fetches/re-downloads only
-// what is actually needed.
+// post can carry several at once (edited AND comments changed AND video size
+// mismatch); a single-action enum would silently drop the combined changes.
+// The apply phase dispatches on each flag independently and re-fetches or
+// re-downloads only what is actually needed.
 type syncItem struct {
 	Post     boosty.Post
 	DirName  string
@@ -30,18 +28,15 @@ type syncItem struct {
 	JustLocked        bool // existed accessible, now locked
 	JustUnlocked      bool // existed locked, now accessible
 	Edited            bool // updatedAt changed
-	NewComments       bool // disk-side count differs from post.Count.Comments
+	NewComments       bool // tracked comments differ from post.Count.Comments
 	BackfillUpdatedAt bool // existing.UpdatedAt was 0; needs persisting
-	DirNameMissing    bool // state entry had no DirName; discarded, post re-classified as IsNew
 
 	// DiskCommentCount is the count of live top-level comments + their inlined
 	// live replies read from comments.json (isDeleted stubs excluded, matching
 	// what post.Count.Comments measures). Populated in classifyPost for posts in
 	// state with HasComments=true. -1 means the file was missing, unreadable, or
 	// corrupt; any non-negative value is directly comparable to
-	// post.Count.Comments. Used instead of Existing.CommentsCount as the trigger
-	// source so legacy state entries that cached an inflated API count cannot
-	// mask on-disk gaps.
+	// post.Count.Comments.
 	DiskCommentCount int
 
 	VideoMismatch string       // detail string (empty = no mismatch)
@@ -87,9 +82,6 @@ func (s syncItem) Labels() []string {
 // Detail aggregates per-flag detail strings for display.
 func (s syncItem) Detail() string {
 	var parts []string
-	if s.DirNameMissing {
-		parts = append(parts, "state entry had no directory name; re-downloading")
-	}
 	if s.JustLocked {
 		parts = append(parts, "was accessible, now locked")
 	}
@@ -101,24 +93,21 @@ func (s syncItem) Detail() string {
 	}
 	if s.NewComments {
 		switch {
-		case s.Existing.HasComments && s.DiskCommentCount < 0:
+		case s.DiskCommentCount < 0:
 			// The trigger fired because comments.json is missing/unreadable,
 			// not because of a count delta — a "N → N" line would read as a
 			// spurious no-op. Name the real reason instead.
 			parts = append(parts, fmt.Sprintf(
 				"comments.json missing or unreadable (API: %d); refetching",
 				s.Post.Count.Comments))
+		case s.Existing.CommentsCapped:
+			// Capped posts fire on the API count moving since the last
+			// fetch; the disk count is permanently below it.
+			parts = append(parts, fmt.Sprintf("comments: %d → %d (capped; %d on disk)",
+				s.Existing.CommentsCount, s.Post.Count.Comments, s.DiskCommentCount))
 		default:
-			// Prefer the disk count when available — that's the value the
-			// trigger fired on, and is what the user actually has locally.
-			// Fall back to the state-cached count for posts that never had
-			// comments tracked.
-			from := s.Existing.CommentsCount
-			if s.Existing.HasComments && s.DiskCommentCount >= 0 {
-				from = s.DiskCommentCount
-			}
 			parts = append(parts, fmt.Sprintf("comments: %d → %d",
-				from, s.Post.Count.Comments))
+				s.DiskCommentCount, s.Post.Count.Comments))
 		}
 	}
 	if s.VideoMismatch != "" {
@@ -131,28 +120,17 @@ func (s syncItem) Detail() string {
 }
 
 // classifyPost compares post against state and returns a syncItem with all
-// applicable flags set. dirFormat governs the freshly-formatted directory
-// name (used for new/unlocked posts where the title may have changed).
-func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) syncItem {
+// applicable flags set. State entries with an empty DirName never reach here
+// — loadState drops them.
+func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 	existing, inState := st.Get(post.ID)
 
 	item := syncItem{Post: post, DiskCommentCount: -1}
 
-	// filepath.Join(blogDir, "") is blogDir, so an entry with no DirName aims
-	// classify at the blog root's comments.json and apply at the blog root
-	// itself. saveNewPost guards the write side; this closes the read side for
-	// entries left by builds predating it. Dropping the entry re-downloads the
-	// post into a real directory and overwrites the bad entry.
-	if inState && existing.DirName == "" {
-		inState = false
-		existing = state.PostEntry{}
-		item.DirNameMissing = true
-	}
-
 	if !inState {
 		// DirName stays empty for out-of-state posts: nothing reads it —
 		// display prints titles, the check phases skip !InState items, and
-		// the real directory name is decided at apply time (SavePost formats
+		// the real directory name is decided at apply time (savePost formats
 		// it from the possibly-refreshed post and the dirReserver may still
 		// suffix it on collision), so a name computed here could only be
 		// wrong or unused.
@@ -176,10 +154,10 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 	}
 
 	if existing.Locked {
-		// Was locked, now accessible — treat like UNLOCKED: full re-download.
-		// Use a freshly-formatted dir name in case the title changed.
+		// Was locked, now accessible — UNLOCKED: full re-download through
+		// the first-download flow, which also decides the directory (the
+		// title may have changed during the lock).
 		item.JustUnlocked = true
-		item.DirName = parser.FormatDirName(dirFormat, post.Title, post.PublishTime, post.ID)
 		return item
 	}
 
@@ -194,55 +172,42 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 		item.BackfillUpdatedAt = true
 	}
 
-	// Comment-count trigger: prefer disk reality over the state-cached count.
-	// The cached value is post.Count.Comments at last save, so for posts whose
-	// Boosty count includes inlined replies that weren't actually saved (the
-	// pre-reply_limit bug), state matches API while disk silently has fewer.
-	// Reading comments.json catches that gap on the next sync without any flag.
+	// Comment-count trigger, only for posts whose comments are tracked
+	// (HasComments): content flags are not retroactive, so a post saved
+	// without --comments never fetches them from sync — --force backfills.
 	//
-	// For posts the user never asked to track comments (HasComments=false) we
-	// have no disk file to consult, so fall back to the legacy state-vs-API
-	// comparison — preserves prior behavior for that case.
+	// Prefer disk reality over the state-cached count. The cached value is
+	// post.Count.Comments at last save, so for posts whose Boosty count
+	// includes inlined replies that weren't actually saved (the pre-
+	// reply_limit bug), state matches API while disk silently has fewer;
+	// reading comments.json catches that gap on the next sync without any
+	// flag.
 	//
-	// CommentsCapped suppresses re-trigger when the prior save hit Boosty's
-	// structural ceiling (>100 top-level items in the single page the endpoint
-	// serves, or a thread whose live replies were not all inlined within
-	// reply_limit) — disk count can never catch up to API count, so a literal
-	// "n != post.Count.Comments" would fire on every sync forever.
-	//
-	// Suppression is one-directional: only when disk < API (the unreachable-
-	// catch-up case the cap was made for). If disk > API the author deleted
-	// comments and we need to re-fetch to drop the orphaned threads, even
-	// for previously-capped posts — refetch will rewrite CommentsCapped via
-	// buildSyncEntry based on the fresh result.
-	//
-	// Known leak: a capped post that gains a new top-level thread (count
-	// grows from cap+M to cap+M+1) stays suppressed too — disk is still
-	// below API, the cap is real, and we don't track per-thread deltas. The
-	// new thread will only be picked up if the post is edited (Edited path
-	// forces actions.Comments), if deletions push API below disk, or if the
-	// user deletes comments.json to force a refetch (the missing-file branch
-	// below bypasses suppression; note --check-files does NOT help here —
-	// detectMissingFiles only stats existence and comments.json exists).
-	// Acceptable for a downloader CLI: the alternative is refetching every
-	// capped post every sync with no path to closure, which is louder noise
-	// than this quiet undercount.
+	// A CommentsCapped post can never have disk catch up with the API (the
+	// endpoint serves one page), so for those the API count at last fetch
+	// (CommentsCount) is the baseline instead: the refetch fires once per
+	// API-side change — new threads, deletions — and goes quiet after a
+	// successful fetch rewrites CommentsCount.
 	if existing.HasComments {
-		if n, ok := diskCommentCount(filepath.Join(blogDir, existing.DirName)); ok {
-			item.DiskCommentCount = n
-			suppress := existing.CommentsCapped && n < post.Count.Comments
-			if n != post.Count.Comments && !suppress {
-				item.NewComments = true
-			}
-		} else {
-			// Missing or unreadable comments.json with HasComments=true is
-			// itself a reason to refetch when the post has any comments.
+		n, ok := diskCommentCount(filepath.Join(blogDir, existing.DirName))
+		switch {
+		case !ok:
+			// Missing or unreadable comments.json is itself a reason to
+			// refetch when the post has any comments.
 			if post.Count.Comments > 0 {
 				item.NewComments = true
 			}
+		case existing.CommentsCapped:
+			item.DiskCommentCount = n
+			if post.Count.Comments != existing.CommentsCount {
+				item.NewComments = true
+			}
+		default:
+			item.DiskCommentCount = n
+			if n != post.Count.Comments {
+				item.NewComments = true
+			}
 		}
-	} else if post.Count.Comments != existing.CommentsCount {
-		item.NewComments = true
 	}
 
 	return item
@@ -257,9 +222,8 @@ func classifyPost(post boosty.Post, st *state.State, blogDir, dirFormat string) 
 // stubs, which count as live here. The inflated count triggers a refetch as
 // soon as it disagrees with the API count, and the rewrite adds the markers —
 // but while the two coincidentally match (K unmarked stubs offsetting K new
-// live comments), the gap goes undetected until the counts drift. Same blind
-// spot the old raw comparison had; closing it would mean refetching every
-// legacy post unconditionally.
+// live comments), the gap goes undetected until the counts drift. Closing
+// it would mean refetching every legacy post unconditionally.
 func diskCommentCount(dir string) (int, bool) {
 	data, err := os.ReadFile(filepath.Join(dir, "comments.json"))
 	if err != nil {

@@ -9,12 +9,16 @@
 package syncer
 
 import (
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/parser"
+	"github.com/wpt/b00p/pkg/state"
 )
 
 // Config carries every input the engine needs to act on a blog. Fields map
@@ -41,7 +45,8 @@ type Config struct {
 	DownloadExternal bool
 
 	// Force ignores state during DownloadAll and re-processes every post.
-	// Existing non-empty media files are still skipped at the file layer.
+	// Existing non-empty media files are still skipped unless the post was
+	// edited since its post.json was saved (see SavePost).
 	Force bool
 
 	// CheckMedia runs HEAD-based video size validation as part of Sync.
@@ -99,4 +104,35 @@ func New(c *boosty.Client, cfg Config) *Engine {
 		cfg.Workers = 1
 	}
 	return &Engine{c: c, cfg: cfg, res: newDirReserver()}
+}
+
+// blogDir is the per-blog root every artefact lives under.
+func (e *Engine) blogDir() string {
+	return filepath.Join(e.cfg.OutputDir, e.cfg.Blog)
+}
+
+// loadState creates the blog directory, loads _state.json, drops entries that
+// cannot be used (see State.DropEmptyDirNames) and seeds the dir reserver
+// with every tracked directory so a same-run NEW post whose formatted name
+// collides with a tracked post's folder is suffixed instead of claiming it —
+// the disk probe alone reports a tracked folder as free while its post.json
+// is missing.
+func (e *Engine) loadState() (string, *state.State, error) {
+	blogDir := e.blogDir()
+	if err := os.MkdirAll(blogDir, 0755); err != nil {
+		return "", nil, err
+	}
+	st, err := state.Load(blogDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("load state: %w", err)
+	}
+	if dropped := st.DropEmptyDirNames(); len(dropped) > 0 {
+		e.c.Log.Printf("  warning: dropped %d state entr%s with no directory name (%v); the posts re-download",
+			len(dropped), map[bool]string{true: "y", false: "ies"}[len(dropped) == 1], dropped)
+		if err := st.Save(); err != nil {
+			return "", nil, fmt.Errorf("save state: %w", err)
+		}
+	}
+	e.res.seed(blogDir, st.Posts)
+	return blogDir, st, nil
 }

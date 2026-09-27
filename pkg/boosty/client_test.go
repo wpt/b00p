@@ -307,7 +307,7 @@ func TestDownloadOnce_SuccessLeavesNoTmp(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "video.mp4")
-	if err := c.downloadOnce(server.URL+"/file", path); err != nil {
+	if err := c.downloadOnce(DownloadRequest{URL: server.URL + "/file", Path: path}); err != nil {
 		t.Fatalf("downloadOnce error: %v", err)
 	}
 
@@ -355,7 +355,7 @@ func TestDownloadOnce_MidStreamFailureKeepsPartialTmp(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "video.mp4")
-	err := c.downloadOnce(server.URL+"/file", path)
+	err := c.downloadOnce(DownloadRequest{URL: server.URL + "/file", Path: path})
 	if err == nil {
 		t.Fatal("downloadOnce should fail on mid-stream connection drop")
 	}
@@ -369,15 +369,16 @@ func TestDownloadOnce_MidStreamFailureKeepsPartialTmp(t *testing.T) {
 	if info.Size() == 0 {
 		t.Errorf("expected partial %s.tmp to hold the bytes we received, got 0", path)
 	}
-	// The sidecar must exist alongside the partial and pin the URL — without
-	// it the next attempt treats the tmp as orphaned and restarts from byte 0,
-	// silently disabling resume.
+	// The sidecar must exist alongside the partial and pin the object key
+	// (the URL, absent an explicit Key) and the advertised total — without
+	// it the next attempt treats the tmp as orphaned and restarts from byte
+	// 0, silently disabling resume.
 	sidecar, scErr := os.ReadFile(path + ".tmp.url")
 	if scErr != nil {
 		t.Fatalf("expected resume sidecar %s.tmp.url next to the partial: %v", path, scErr)
 	}
-	if string(sidecar) != server.URL+"/file" {
-		t.Errorf("sidecar = %q, want the download URL %q", sidecar, server.URL+"/file")
+	if sc := parseResumeSidecar(sidecar); sc.Key != server.URL+"/file" || sc.Total != 1000000 {
+		t.Errorf("sidecar = %+v, want key %q and total 1000000", sc, server.URL+"/file")
 	}
 }
 
@@ -396,7 +397,7 @@ func TestDownloadOnce_HTTPErrorLeavesNoTmp(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "video.mp4")
-	err := c.downloadOnce(server.URL+"/file", path)
+	err := c.downloadOnce(DownloadRequest{URL: server.URL + "/file", Path: path})
 	if err == nil {
 		t.Fatal("downloadOnce should fail on 403")
 	}
@@ -431,7 +432,7 @@ func TestDownloadOnce_OverwritesStaleTmp(t *testing.T) {
 		t.Fatalf("seed stale .tmp: %v", err)
 	}
 
-	if err := c.downloadOnce(server.URL+"/file", path); err != nil {
+	if err := c.downloadOnce(DownloadRequest{URL: server.URL + "/file", Path: path}); err != nil {
 		t.Fatalf("downloadOnce error: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -480,7 +481,7 @@ func TestDownloadOnce_ResumesVia206(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.downloadOnce(dlURL, path); err != nil {
+	if err := c.downloadOnce(DownloadRequest{URL: dlURL, Path: path}); err != nil {
 		t.Fatalf("downloadOnce: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -491,6 +492,133 @@ func TestDownloadOnce_ResumesVia206(t *testing.T) {
 		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be gone after success, stat err = %v", leftover, err)
 		}
+	}
+}
+
+// The sidecar is keyed on DownloadRequest.Key, not the URL: a signed okcdn
+// URL changes on every refresh, so a partial from a crashed run must still
+// resume when the next run downloads the same object through a new URL.
+func TestDownloadOnce_ResumesAcrossURLChangeWithSameKey(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Range"); got != "bytes=4-" {
+			t.Errorf("Range = %q, want bytes=4- (same key must resume)", got)
+		}
+		w.Header().Set("Content-Range", "bytes 4-7/8")
+		w.WriteHeader(http.StatusPartialContent)
+		fmt.Fprint(w, "tail")
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(path+".tmp", []byte("head"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Recorded against a URL that no longer exists; key and total still match.
+	if err := os.WriteFile(path+".tmp.url", resumeSidecar{Key: "video-42", Total: 8}.encode(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := c.downloadOnce(DownloadRequest{URL: server.URL + "/refreshed?sig=new", Path: path, Key: "video-42"})
+	if err != nil {
+		t.Fatalf("downloadOnce: %v", err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "headtail" {
+		t.Errorf("file = %q, want 'headtail'", data)
+	}
+}
+
+// Same key but a different advertised total: the object was re-encoded
+// between runs, so the partial must be dropped and the retry restarts at 0.
+func TestDownloadOnce_TotalMismatchDropsPair(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 4-7/8")
+		w.WriteHeader(http.StatusPartialContent)
+		fmt.Fprint(w, "tail")
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(path+".tmp", []byte("head"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".tmp.url", resumeSidecar{Key: "video-42", Total: 999}.encode(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := c.downloadOnce(DownloadRequest{URL: server.URL + "/file", Path: path, Key: "video-42"})
+	if err == nil {
+		t.Fatal("downloadOnce should fail when the advertised total differs from the recorded one")
+	}
+	if errors.Is(err, errNonRetriable) {
+		t.Errorf("error %v must stay retriable (the pair was dropped, the retry restarts from 0)", err)
+	}
+	for _, leftover := range []string{path + ".tmp", path + ".tmp.url"} {
+		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be dropped, stat err = %v", leftover, err)
+		}
+	}
+}
+
+// Replace downloads over an existing non-empty file; the old bytes survive
+// until the new ones are renamed into place, so a failed re-download never
+// empties the slot.
+func TestDownload_ReplaceOverwritesExistingAndKeepsOldOnFailure(t *testing.T) {
+	saved := RetryDelays
+	RetryDelays = []time.Duration{time.Millisecond}
+	defer func() { RetryDelays = saved }()
+
+	var fail atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, "new content")
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "video.mp4")
+	if err := os.WriteFile(path, []byte("old content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: path, Replace: true}); err != nil {
+		t.Fatalf("Download(replace): %v", err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "new content" {
+		t.Errorf("file = %q, want the replacement", data)
+	}
+
+	fail.Store(true)
+	if err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: path, Replace: true}); err == nil {
+		t.Fatal("Download(replace) against a 404 should fail")
+	}
+	if data, _ := os.ReadFile(path); string(data) != "new content" {
+		t.Errorf("file = %q after failed replace, want the previous bytes untouched", data)
 	}
 }
 
@@ -520,7 +648,7 @@ func TestDownloadOnce_SidecarURLMismatchRestartsFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.downloadOnce(server.URL+"/file", path); err != nil {
+	if err := c.downloadOnce(DownloadRequest{URL: server.URL + "/file", Path: path}); err != nil {
 		t.Fatalf("downloadOnce: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -556,7 +684,7 @@ func TestDownloadOnce_206WrongContentRangeDropsPair(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.downloadOnce(dlURL, path); err == nil {
+	if err := c.downloadOnce(DownloadRequest{URL: dlURL, Path: path}); err == nil {
 		t.Fatal("downloadOnce should fail on a Content-Range that does not start at the requested offset")
 	}
 	for _, leftover := range []string{path + ".tmp", path + ".tmp.url"} {
@@ -589,7 +717,7 @@ func TestDownloadOnce_416DropsPair(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.downloadOnce(dlURL, path); err == nil {
+	if err := c.downloadOnce(DownloadRequest{URL: dlURL, Path: path}); err == nil {
 		t.Fatal("downloadOnce should fail on 416")
 	}
 	for _, leftover := range []string{path + ".tmp", path + ".tmp.url"} {
@@ -626,7 +754,7 @@ func TestDownloadOnce_200AfterRangeTruncatesAndRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.downloadOnce(dlURL, path); err != nil {
+	if err := c.downloadOnce(DownloadRequest{URL: dlURL, Path: path}); err != nil {
 		t.Fatalf("downloadOnce: %v", err)
 	}
 	data, _ := os.ReadFile(path)
@@ -874,15 +1002,12 @@ func TestRefresh_StatusClassification(t *testing.T) {
 // the param the server returns replies.data=[] regardless of replyCount, which
 // silently dropped every reply body before this fix.
 func TestCommentsURL_IncludesReplyLimit(t *testing.T) {
-	got := CommentsURL("someblog", "post-id-123", 50, 0)
+	got := CommentsURL("someblog", "post-id-123", 50)
 	if !strings.Contains(got, "reply_limit=100") {
 		t.Errorf("CommentsURL = %q, missing reply_limit=100", got)
 	}
 	if !strings.Contains(got, "limit=50") {
 		t.Errorf("CommentsURL = %q, missing limit=50", got)
-	}
-	if !strings.Contains(got, "offset=0") {
-		t.Errorf("CommentsURL = %q, missing offset=0", got)
 	}
 }
 
