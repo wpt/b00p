@@ -29,7 +29,7 @@ Rename it to `b00p` (or `b00p.exe` on Windows) and put it anywhere on your `PATH
 
 ### Build from source
 
-Requires **Go 1.26.6+**:
+Requires **Go 1.26.8+**:
 
 ```bash
 go install github.com/wpt/b00p@latest
