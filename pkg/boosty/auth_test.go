@@ -2,10 +2,12 @@ package boosty
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -126,39 +128,74 @@ func TestTokens_SaveAndLoad(t *testing.T) {
 	}
 }
 
-// Regression: the previous Refresh body was built by fmt.Sprintf and would
-// produce invalid JSON if RefreshToken or DeviceID contained backslashes,
-// quotes, or newlines. The typed refreshRequest must round-trip cleanly
-// through json.Marshal regardless of token contents.
-func TestRefreshRequest_EscapesSpecialChars(t *testing.T) {
-	cases := []struct {
-		name         string
-		deviceID     string
-		refreshToken string
-	}{
-		{"backslash", `dev\id`, `ref\token`},
-		{"quote", `dev"id`, `ref"token`},
-		{"newline", "dev\nid", "ref\ntoken"},
-		{"all", "dev\\\"\nid", "ref\\\"\ntoken"},
+// The refresh request as Boosty sees it: a JSON POST to /oauth/token/ with
+// the browser UA and the field names the server expects. The token values
+// carry a backslash, a quote and a newline — the previous fmt.Sprintf body
+// produced invalid JSON for them.
+func TestRefresh_WireRequest(t *testing.T) {
+	const deviceID, refreshToken = "dev\\\"\nid", "ref\\\"\ntoken"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/oauth/token/" {
+			t.Errorf("request = %s %s, want POST /oauth/token/", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != UserAgent {
+			t.Errorf("User-Agent = %q, want the browser UA", got)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode wire body: %v", err)
+		}
+		want := map[string]string{"device_id": deviceID, "refresh_token": refreshToken}
+		if !maps.Equal(body, want) {
+			t.Errorf("wire body = %q, want %q", body, want)
+		}
+		w.Write([]byte(`{"access_token":"a2","refresh_token":"r2","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	tok := &Tokens{AccessToken: "a1", RefreshToken: refreshToken, DeviceID: deviceID}
+	if err := tok.Refresh(rewriteClient(t, server)); err != nil {
+		t.Fatalf("Refresh: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			body, err := json.Marshal(refreshRequest{
-				DeviceID:     tc.deviceID,
-				RefreshToken: tc.refreshToken,
-			})
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			var got refreshRequest
-			if err := json.Unmarshal(body, &got); err != nil {
-				t.Fatalf("unmarshal %q: %v", body, err)
-			}
-			if got.DeviceID != tc.deviceID || got.RefreshToken != tc.refreshToken {
-				t.Errorf("round-trip mismatch: got %+v, want device=%q refresh=%q",
-					got, tc.deviceID, tc.refreshToken)
-			}
-		})
+	if tok.AccessToken != "a2" || tok.RefreshToken != "r2" || tok.DeviceID != deviceID || tok.ExpiresAt == 0 {
+		t.Errorf("tokens after refresh = %+v, want a2/r2, same device, expiresAt set", tok)
+	}
+}
+
+// An antivirus, indexer or backup handle on auth.json blocks the rename on
+// Windows until it closes; SaveTokens must wait it out instead of failing.
+// Go opens files without FILE_SHARE_DELETE, so os.Open stands in for it.
+func TestSaveTokens_RetriesWhileFileLockedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("an open handle blocks a rename only on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := (&Tokens{AccessToken: "a1"}).SaveTokens(path); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	saved := saveRetryWindow
+	saveRetryWindow = 0
+	err = (&Tokens{AccessToken: "a2"}).SaveTokens(path)
+	saveRetryWindow = saved
+	if err == nil {
+		f.Close()
+		t.Fatal("SaveTokens without retries succeeded under an open handle; the test no longer models the lock")
+	}
+
+	time.AfterFunc(200*time.Millisecond, func() { f.Close() })
+	if err := (&Tokens{AccessToken: "a2"}).SaveTokens(path); err != nil {
+		t.Fatalf("SaveTokens while locked: %v", err)
+	}
+	if loaded, err := LoadTokens(path); err != nil || loaded.AccessToken != "a2" {
+		t.Errorf("auth.json = %+v, %v; want a2", loaded, err)
 	}
 }
 
