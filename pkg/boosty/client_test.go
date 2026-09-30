@@ -966,15 +966,17 @@ func TestGetJSON_RefreshSaveFailureFailsClosed(t *testing.T) {
 // token) wraps ErrRefreshRejected; 429 and 5xx stay plain (transient). The
 // user-visible message is identical either way.
 func TestRefresh_StatusClassification(t *testing.T) {
+	const getNewTokens = "Get new tokens from browser cookies and update auth.json"
 	cases := []struct {
 		status   int
 		rejected bool
+		wantMsg  string
 	}{
-		{http.StatusBadRequest, true},
-		{http.StatusUnauthorized, true},
-		{http.StatusForbidden, true},
-		{http.StatusTooManyRequests, false},
-		{http.StatusBadGateway, false},
+		{http.StatusBadRequest, true, getNewTokens},
+		{http.StatusUnauthorized, true, getNewTokens},
+		{http.StatusForbidden, true, getNewTokens},
+		{http.StatusTooManyRequests, false, "try again later"},
+		{http.StatusBadGateway, false, "try again later"},
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
@@ -991,8 +993,11 @@ func TestRefresh_StatusClassification(t *testing.T) {
 			if got := errors.Is(err, ErrRefreshRejected); got != tc.rejected {
 				t.Errorf("errors.Is(err, ErrRefreshRejected) = %v, want %v (err=%v)", got, tc.rejected, err)
 			}
-			if !strings.Contains(err.Error(), "Get new tokens from browser cookies and update auth.json") {
-				t.Errorf("err = %q, must keep the actionable instruction", err)
+			if !strings.Contains(err.Error(), tc.wantMsg) {
+				t.Errorf("err = %q, want it to contain %q", err, tc.wantMsg)
+			}
+			if !tc.rejected && strings.Contains(err.Error(), getNewTokens) {
+				t.Errorf("err = %q: a transient failure must not send the user to re-extract tokens", err)
 			}
 		})
 	}

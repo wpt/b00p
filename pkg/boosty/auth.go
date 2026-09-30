@@ -20,7 +20,7 @@ import (
 // status: the refresh token itself is dead (expired or revoked), so retrying
 // the identical request cannot succeed. GetJSON fails fast on it instead of
 // burning the backoff schedule. The message doubles as the user-facing
-// instruction, so refresh errors render exactly as before.
+// instruction.
 //
 //lint:ignore ST1005 the message renders mid-sentence after "(status %d)." — the capital starts the user-facing instruction sentence, not an error string.
 var ErrRefreshRejected = errors.New("Get new tokens from browser cookies and update auth.json")
@@ -165,8 +165,9 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 			// verdict is permanent. Wrap the sentinel so callers fail fast.
 			return fmt.Errorf("token refresh failed (status %d). %w", resp.StatusCode, ErrRefreshRejected)
 		}
-		// 5xx / 429: transient edge failure — the retry loop may recover.
-		return fmt.Errorf("token refresh failed (status %d). Get new tokens from browser cookies and update auth.json", resp.StatusCode)
+		// 5xx / 429: transient edge failure — the retry loop may recover,
+		// and the tokens are fine, so don't send the user to re-extract them.
+		return fmt.Errorf("token refresh failed (status %d): Boosty server error, try again later", resp.StatusCode)
 	}
 
 	var result refreshResponse
