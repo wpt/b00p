@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -913,58 +914,388 @@ func TestGetJSON_Refresh5xxStaysRetriable(t *testing.T) {
 	}
 }
 
-func TestGetJSON_RefreshSaveFailureFailsClosed(t *testing.T) {
+// authServer mocks Boosty's token rotation: it honours one access token and
+// one refresh token at a time, and every accepted refresh issues pair N+1
+// (aN/rN) and kills pair N, exactly as the real server consumes a refresh
+// token. /v1/x answers 200 only for the honoured access token, 401 otherwise.
+type authServer struct {
+	mu      sync.Mutex
+	access  string // honoured access token; "" until the first refresh
+	refresh string // the one refresh token the server accepts
+	gen     int
+
+	// onRefresh, if set, runs under mu at the start of every refresh POST.
+	onRefresh func(s *authServer)
+	// onStale, if set, runs (without mu) before an API request with a
+	// non-honoured access token gets its 401.
+	onStale func()
+
+	refreshPosts atomic.Int32
+	apiOK        atomic.Int32
+}
+
+// newAuthServer starts a server that accepts refresh token r1 and honours
+// no access token yet, so a client holding a0/r1 must refresh to a2/r2.
+func newAuthServer(t *testing.T) (*authServer, *http.Client) {
+	t.Helper()
+	s := &authServer{refresh: "r1", gen: 1}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token/", s.handleRefresh)
+	mux.HandleFunc("/v1/x", s.handleAPI)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return s, rewriteClient(t, srv)
+}
+
+// rotate issues the next pair. Caller holds mu.
+func (s *authServer) rotate() {
+	s.gen++
+	s.access, s.refresh = fmt.Sprintf("a%d", s.gen), fmt.Sprintf("r%d", s.gen)
+}
+
+func (s *authServer) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	s.refreshPosts.Add(1)
+	var body map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.onRefresh != nil {
+		s.onRefresh(s)
+	}
+	if body["refresh_token"] != s.refresh {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	s.rotate()
+	json.NewEncoder(w).Encode(map[string]any{
+		"access_token":  s.access,
+		"refresh_token": s.refresh,
+		"expires_in":    3600,
+	})
+}
+
+func (s *authServer) handleAPI(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	ok := s.access != "" && r.Header.Get("Authorization") == "Bearer "+s.access
+	s.mu.Unlock()
+	if !ok {
+		if s.onStale != nil {
+			s.onStale()
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	s.apiOK.Add(1)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// The refresh success path, for both triggers: a 401 on a token without
+// expiresAt (the documented auth.json setup) and the proactive refresh of an
+// expired one. The retry must carry the new token, and auth.json must end up
+// holding the rotated pair — the old refresh token is dead server-side.
+func TestGetJSON_RefreshRetriesAndPersists(t *testing.T) {
+	for name, expiresAt := range map[string]int64{
+		"401":     0,
+		"expired": time.Now().Add(-time.Hour).UnixMilli(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, hc := newAuthServer(t)
+			authPath := filepath.Join(t.TempDir(), "auth.json")
+			tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "d", ExpiresAt: expiresAt}
+			if err := tok.SaveTokens(authPath); err != nil {
+				t.Fatal(err)
+			}
+			c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+
+			var out map[string]string
+			if err := c.GetJSON(BaseURL+"/v1/x", &out); err != nil {
+				t.Fatalf("GetJSON: %v", err)
+			}
+			if got := srv.refreshPosts.Load(); got != 1 {
+				t.Errorf("refresh POSTs = %d, want 1", got)
+			}
+			if got := srv.apiOK.Load(); got != 1 {
+				t.Errorf("API calls with the new token = %d, want 1", got)
+			}
+			disk, err := LoadTokens(authPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if disk.AccessToken != "a2" || disk.RefreshToken != "r2" || disk.DeviceID != "d" || disk.ExpiresAt == 0 {
+				t.Errorf("auth.json = %+v, want a2/r2/d with expiresAt set", disk)
+			}
+		})
+	}
+}
+
+// N workers hit a 401 with the same stale token; exactly one of them may
+// refresh. The barrier holds every 401 until all N stale requests have
+// arrived, so all N take the refresh path concurrently (the -race CI job's
+// coverage of tokensMu).
+func TestGetJSON_ConcurrentRefreshDedup(t *testing.T) {
+	const n = 6
+	srv, hc := newAuthServer(t)
+	var stale atomic.Int32
+	release := make(chan struct{})
+	srv.onStale = func() {
+		if stale.Add(1) == n {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+			t.Error("the stale-token requests never all arrived together")
+		}
+	}
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1"}
+	if err := tok.SaveTokens(authPath); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			var out map[string]string
+			errs[i] = c.GetJSON(BaseURL+"/v1/x", &out)
+		})
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("worker %d: %v", i, err)
+		}
+	}
+	if got := srv.refreshPosts.Load(); got != 1 {
+		t.Errorf("refresh POSTs = %d, want 1", got)
+	}
+	if got := srv.apiOK.Load(); got != n {
+		t.Errorf("API calls with the new token = %d, want %d", got, n)
+	}
+	if got := stale.Load(); got != n {
+		t.Errorf("stale-token requests = %d, want %d", got, n)
+	}
+}
+
+// A save that fails after a successful refresh must not roll back: the
+// server has already consumed the old refresh token. The rotated pair stays
+// in memory and lands in auth.json.new, the error names that file, and the
+// client never rotates again, so that file stays the valid credential.
+func TestGetJSON_RefreshSaveFailureKeepsRotatedTokens(t *testing.T) {
+	saved, savedWindow := RetryDelays, saveRetryWindow
+	RetryDelays, saveRetryWindow = []time.Duration{time.Millisecond}, 0
+	defer func() { RetryDelays, saveRetryWindow = saved, savedWindow }()
+
+	srv, hc := newAuthServer(t)
+	// A directory where auth.json should be: the rename onto it fails on
+	// every platform, while the sibling fallback file can still be written.
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.Mkdir(authPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+
+	var out map[string]string
+	err := c.GetJSON(BaseURL+"/v1/x", &out)
+	if !errors.Is(err, ErrTokenSaveFailed) {
+		t.Fatalf("err = %v, want ErrTokenSaveFailed in chain", err)
+	}
+	if !strings.Contains(err.Error(), authPath+".new") {
+		t.Errorf("err = %q, must name the fallback file", err)
+	}
+	if got := srv.apiOK.Load(); got != 0 {
+		t.Errorf("API calls after the failed save = %d, want 0", got)
+	}
+	if tok.AccessToken != "a2" || tok.RefreshToken != "r2" {
+		t.Errorf("in-memory tokens = %+v, want the rotated a2/r2", tok)
+	}
+	if disk, err := LoadTokens(authPath + ".new"); err != nil || disk.RefreshToken != "r2" {
+		t.Errorf("fallback file = %+v, %v; want refresh token r2", disk, err)
+	}
+
+	// Other workers keep using the live in-memory token...
+	if err := c.GetJSON(BaseURL+"/v1/x", &out); err != nil {
+		t.Errorf("GetJSON with the rotated token: %v", err)
+	}
+	// ...but the next refresh fails without a POST: rotating again would
+	// leave auth.json.new holding a dead refresh token.
+	tok.ExpiresAt = time.Now().Add(-time.Hour).UnixMilli()
+	if err := c.GetJSON(BaseURL+"/v1/x", &out); !errors.Is(err, ErrTokenSaveFailed) {
+		t.Errorf("err after expiry = %v, want ErrTokenSaveFailed", err)
+	}
+	if got := srv.refreshPosts.Load(); got != 1 {
+		t.Errorf("refresh POSTs = %d, want 1", got)
+	}
+}
+
+// When the fallback file cannot be written either, the error must say the
+// new tokens die with the process instead of pointing at a file.
+func TestGetJSON_RefreshSaveAndFallbackFailure(t *testing.T) {
 	saved := RetryDelays
 	RetryDelays = []time.Duration{time.Millisecond}
 	defer func() { RetryDelays = saved }()
 
-	var apiCalls int32
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth/token/", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
-			"access_token":  "fresh",
-			"refresh_token": "fresh-refresh",
-			"expires_in":    3600,
-		})
-	})
-	mux.HandleFunc("/v1/test", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&apiCalls, 1)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
-	server := httptest.NewServer(mux)
-	defer server.Close()
-
-	tok := &Tokens{
-		AccessToken:  "stale",
-		RefreshToken: "old-refresh",
-		ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(),
-	}
+	_, hc := newAuthServer(t)
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	c := &Client{
 		Tokens:   tok,
 		AuthPath: filepath.Join(t.TempDir(), "missing-parent", "auth.json"),
-		HTTP:     rewriteClient(t, server),
+		HTTP:     hc,
 		Log:      discardLogger{},
 	}
 
 	var out map[string]string
-	err := c.GetJSON(BaseURL+"/v1/test", &out)
-	if err == nil {
-		t.Fatal("GetJSON should fail when refreshed tokens cannot be saved")
-	}
+	err := c.GetJSON(BaseURL+"/v1/x", &out)
 	if !errors.Is(err, ErrTokenSaveFailed) {
 		t.Fatalf("err = %v, want ErrTokenSaveFailed in chain", err)
 	}
-	if got := atomic.LoadInt32(&apiCalls); got != 0 {
-		t.Errorf("API calls with unpersisted token = %d, want 0", got)
+	if !strings.Contains(err.Error(), "get new tokens from browser cookies") {
+		t.Errorf("err = %q, must tell the user the new tokens are lost", err)
 	}
-	if tok.AccessToken != "stale" || tok.RefreshToken != "old-refresh" {
-		t.Errorf("tokens mutated after save failure: %+v", tok)
+	if tok.RefreshToken != "r2" {
+		t.Errorf("in-memory refresh token = %q, want the rotated r2", tok.RefreshToken)
+	}
+}
+
+// Two processes share auth.json. The one that refreshes first rotates r1
+// away; the other must adopt the saved pair instead of POSTing its dead r1.
+func TestGetJSON_AdoptsTokensRotatedByAnotherProcess(t *testing.T) {
+	srv, hc := newAuthServer(t)
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	loaded := Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	if err := loaded.SaveTokens(authPath); err != nil {
+		t.Fatal(err)
+	}
+	newProcess := func() *Client {
+		tok := loaded
+		return &Client{Tokens: &tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+	}
+	first, second := newProcess(), newProcess()
+
+	var out map[string]string
+	if err := first.GetJSON(BaseURL+"/v1/x", &out); err != nil {
+		t.Fatalf("first process: %v", err)
+	}
+	if err := second.GetJSON(BaseURL+"/v1/x", &out); err != nil {
+		t.Fatalf("second process: %v", err)
+	}
+	if got := srv.refreshPosts.Load(); got != 1 {
+		t.Errorf("refresh POSTs = %d, want 1 (the second process adopts)", got)
+	}
+	if second.Tokens.RefreshToken != "r2" {
+		t.Errorf("second process refresh token = %q, want r2", second.Tokens.RefreshToken)
+	}
+}
+
+// The other process saves its rotated pair after our pre-refresh read but
+// before our POST lands: the rejection must trigger one more read of
+// auth.json, which recovers instead of failing the run.
+func TestGetJSON_AdoptsTokensAfterRejection(t *testing.T) {
+	srv, hc := newAuthServer(t)
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	if err := tok.SaveTokens(authPath); err != nil {
+		t.Fatal(err)
+	}
+	var raced atomic.Bool
+	srv.onRefresh = func(s *authServer) {
+		if raced.Swap(true) {
+			return
+		}
+		s.rotate()
+		other := Tokens{AccessToken: s.access, RefreshToken: s.refresh, ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+		if err := other.SaveTokens(authPath); err != nil {
+			t.Errorf("simulate other process: %v", err)
+		}
+	}
+	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+
+	var out map[string]string
+	if err := c.GetJSON(BaseURL+"/v1/x", &out); err != nil {
+		t.Fatalf("GetJSON: %v", err)
+	}
+	if tok.RefreshToken != "r2" {
+		t.Errorf("refresh token = %q, want the adopted r2", tok.RefreshToken)
+	}
+	if got := srv.refreshPosts.Load(); got != 1 {
+		t.Errorf("refresh POSTs = %d, want 1", got)
+	}
+}
+
+// An auth.json older than the in-memory pair (restored from a backup, or a
+// startup rewrite by another b00p that raced our save) holds a consumed
+// refresh token; adopting it would kill a working client.
+func TestGetJSON_IgnoresOlderTokensOnDisk(t *testing.T) {
+	srv, hc := newAuthServer(t)
+	srv.mu.Lock()
+	srv.rotate() // the server now accepts r2 only
+	srv.mu.Unlock()
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	backup := Tokens{AccessToken: "a1", RefreshToken: "r1", ExpiresAt: time.Now().Add(-2 * time.Hour).UnixMilli()}
+	if err := backup.SaveTokens(authPath); err != nil {
+		t.Fatal(err)
+	}
+	tok := &Tokens{AccessToken: "a2", RefreshToken: "r2", ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()}
+	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+
+	var out map[string]string
+	if err := c.GetJSON(BaseURL+"/v1/x", &out); err != nil {
+		t.Fatalf("GetJSON: %v", err)
+	}
+	if disk, err := LoadTokens(authPath); err != nil || disk.RefreshToken != "r3" {
+		t.Errorf("auth.json = %+v, %v; want the rotated r3", disk, err)
+	}
+}
+
+// Once the server rejects a refresh token, later requests must fail without
+// POSTing it again; a different refresh token is tried normally.
+func TestGetJSON_RejectedRefreshIsNotRetried(t *testing.T) {
+	var refreshCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth/token/", func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	c := &Client{
+		Tokens: &Tokens{
+			AccessToken:  "stale",
+			RefreshToken: "dead",
+			ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(),
+		},
+		HTTP: rewriteClient(t, server),
+		Log:  discardLogger{},
+	}
+
+	var out map[string]string
+	for i := range 5 {
+		if err := c.GetJSON(BaseURL+"/v1/test", &out); !errors.Is(err, ErrRefreshRejected) {
+			t.Fatalf("call %d: err = %v, want ErrRefreshRejected", i, err)
+		}
+	}
+	if got := refreshCalls.Load(); got != 1 {
+		t.Errorf("refresh POSTs = %d, want 1", got)
+	}
+
+	c.Tokens.RefreshToken = "other"
+	c.GetJSON(BaseURL+"/v1/test", &out)
+	if got := refreshCalls.Load(); got != 2 {
+		t.Errorf("refresh POSTs after new tokens = %d, want 2", got)
 	}
 }
 
 // Tokens.Refresh classifies the server verdict: 4xx (dead/revoked refresh
-// token) wraps ErrRefreshRejected; 429 and 5xx stay plain (transient). The
-// user-visible message is identical either way.
+// token) wraps ErrRefreshRejected and tells the user to get new tokens; 429
+// and 5xx stay plain (transient) and must not, since the tokens are fine.
 func TestRefresh_StatusClassification(t *testing.T) {
 	const getNewTokens = "Get new tokens from browser cookies and update auth.json"
 	cases := []struct {
