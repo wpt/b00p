@@ -1,5 +1,6 @@
 auth.json
 auth.json.bak
+auth.json.new
 auth.json.tmp-*
 output/
 

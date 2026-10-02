@@ -26,9 +26,12 @@ import (
 // (page error) vs. skip the offending item (parse error).
 var ErrFetchPage = errors.New("page fetch failed")
 
-// ErrTokenSaveFailed marks a refresh that succeeded in memory but could not
-// be persisted to auth.json. Callers fail fast on it instead of continuing
-// with credentials that will disappear on the next process start.
+// ErrTokenSaveFailed marks a refresh that succeeded but whose rotated tokens
+// could not be written to auth.json. The server invalidates the old refresh
+// token as soon as it issues the new pair, so the Client keeps the new pair
+// in memory, writes it to a sibling auth.json.new named in the error, and
+// never refreshes again (a further rotation would turn that file into a dead
+// credential). GetJSON fails fast on it, so the run ends in an error.
 var ErrTokenSaveFailed = errors.New("token refresh succeeded but saving auth file failed")
 
 const (
@@ -56,9 +59,9 @@ var RetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.S
 // gigabyte-scale videos. Both clients are reused across requests so the
 // connection pool (keep-alive) is shared.
 //
-// tokensMu guards reads/writes of *Tokens fields against concurrent refresh
-// from worker goroutines (--workers > 1). All access goes through
-// currentToken() / refreshAndSave().
+// tokensMu guards reads/writes of *Tokens fields, and the refresh state
+// below, against concurrent refresh from worker goroutines (--workers > 1).
+// All access goes through currentToken() / refreshAndSave().
 type Client struct {
 	Tokens       *Tokens
 	AuthPath     string
@@ -67,6 +70,15 @@ type Client struct {
 	Log          Logger
 
 	tokensMu sync.Mutex
+	// rejectedRefresh/rejectedErr remember a refresh the server rejected
+	// (ErrRefreshRejected), so later requests fail without POSTing that dead
+	// token again. Keyed on the token value: any other pair (adopted from
+	// auth.json, or set by a library caller) is refreshed normally.
+	rejectedRefresh string
+	rejectedErr     error
+	// saveErr is the ErrTokenSaveFailed of a rotated pair that never reached
+	// AuthPath; once set, refreshAndSave returns it instead of refreshing.
+	saveErr error
 }
 
 // Logger is the interface for logging messages.
@@ -245,28 +257,92 @@ func (c *Client) rawRequest(method, url, token string) (*http.Response, error) {
 	return c.HTTP.Do(req)
 }
 
-// refreshAndSave acquires the token mutex, refreshes if no other goroutine
-// already did, and persists the new tokens. staleToken is the token the
-// caller saw before calling — if it no longer matches, another goroutine
-// refreshed first and we return without doing extra work.
+// refreshAndSave acquires the token mutex and replaces the stale access
+// token. staleToken is the token the caller saw before calling — if it no
+// longer matches, another goroutine refreshed first and we return without
+// doing extra work. Otherwise it adopts a pair another b00p process saved to
+// auth.json, or refreshes and persists the result.
+//
+// Refresh leaves the tokens untouched when it fails. Once it succeeds the
+// server has consumed the old refresh token, so the new pair is never rolled
+// back, even when saving it fails.
 func (c *Client) refreshAndSave(staleToken string) error {
 	c.tokensMu.Lock()
 	defer c.tokensMu.Unlock()
 	if c.Tokens.AccessToken != staleToken {
 		return nil
 	}
-	old := *c.Tokens
+	if c.saveErr != nil {
+		return c.saveErr
+	}
+	if c.adoptDiskTokens() && !c.Tokens.IsExpired() {
+		return nil
+	}
+	if c.refreshRejected() {
+		return c.rejectedErr
+	}
 	if err := c.Tokens.Refresh(c.HTTP); err != nil {
-		*c.Tokens = old
+		if errors.Is(err, ErrRefreshRejected) {
+			c.rejectedRefresh, c.rejectedErr = c.Tokens.RefreshToken, err
+			// Another process may have saved its rotated pair between the
+			// read above and our POST.
+			if c.adoptDiskTokens() {
+				return nil
+			}
+		}
 		return err
 	}
-	if c.AuthPath != "" {
-		if err := c.Tokens.SaveTokens(c.AuthPath); err != nil {
-			*c.Tokens = old
-			return fmt.Errorf("%w: %w", ErrTokenSaveFailed, err)
-		}
+	if c.AuthPath == "" {
+		return nil
+	}
+	if err := c.Tokens.SaveTokens(c.AuthPath); err != nil {
+		c.saveErr = c.saveFallback(err)
+		return c.saveErr
 	}
 	return nil
+}
+
+// refreshRejected reports whether the server already rejected the current
+// refresh token. Caller holds tokensMu.
+func (c *Client) refreshRejected() bool {
+	return c.rejectedErr != nil && c.Tokens.RefreshToken == c.rejectedRefresh
+}
+
+// adoptDiskTokens replaces the in-memory pair with the one in AuthPath when
+// the file holds a different refresh token: another b00p process sharing
+// auth.json rotated it (which killed ours), or the user pasted new tokens.
+// A file pair that expires before ours is older than ours — an auth.json
+// restored from a backup, or another process's startup rewrite racing our
+// save — and is adopted only once the server has rejected ours. A missing or
+// unparsable file is ignored: it must not block a refresh that works.
+// Caller holds tokensMu.
+func (c *Client) adoptDiskTokens() bool {
+	if c.AuthPath == "" {
+		return false
+	}
+	disk, err := LoadTokens(c.AuthPath)
+	if err != nil || disk.RefreshToken == c.Tokens.RefreshToken {
+		return false
+	}
+	if disk.ExpiresAt < c.Tokens.ExpiresAt && !c.refreshRejected() {
+		return false
+	}
+	*c.Tokens = *disk
+	return true
+}
+
+// saveFallback handles a rotated pair that SaveTokens could not write to
+// AuthPath. That pair is now the only valid credential, so it goes to a
+// sibling file the user can rename, and the returned ErrTokenSaveFailed
+// says where it is. Caller holds tokensMu.
+func (c *Client) saveFallback(saveErr error) error {
+	fallback := c.AuthPath + ".new"
+	if err := c.Tokens.SaveTokens(fallback); err != nil {
+		return fmt.Errorf("%w: %w; writing %s failed too (%v), so the new tokens are lost when this run ends: get new tokens from browser cookies and update auth.json",
+			ErrTokenSaveFailed, saveErr, fallback, err)
+	}
+	return fmt.Errorf("%w: %w; the new tokens are in %s: rename it to %s before the next run",
+		ErrTokenSaveFailed, saveErr, fallback, c.AuthPath)
 }
 
 // FetchPosts returns an iterator over all posts in a blog.
