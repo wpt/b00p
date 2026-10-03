@@ -1,9 +1,67 @@
 package cmd
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// useAuthFile points the --auth global at a new auth.json with content.
+func useAuthFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	saved := authPath
+	authPath = path
+	t.Cleanup(func() { authPath = saved })
+	return path
+}
+
+// newClient rewrites auth.json up front, which also turns a pasted
+// percent-encoded cookie into plain JSON.
+func TestNewClient_RewritesAuthFile(t *testing.T) {
+	path := useAuthFile(t, `%7B%22accessToken%22%3A%22a%22%2C%22refreshToken%22%3A%22r%22%7D`)
+	if _, err := newClient(); err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tok map[string]any
+	if err := json.Unmarshal(data, &tok); err != nil || tok["accessToken"] != "a" || tok["refreshToken"] != "r" {
+		t.Errorf("auth.json = %s (%v), want the tokens as plain JSON", data, err)
+	}
+}
+
+// Boosty invalidates the old refresh token as soon as a refresh succeeds, so
+// an auth.json b00p cannot rewrite must stop the run before any API call.
+func TestNewClient_RejectsUnwritableAuthFile(t *testing.T) {
+	path := useAuthFile(t, `{"accessToken":"a","refreshToken":"r"}`)
+	// Windows: the read-only attribute blocks the rename. Elsewhere a
+	// read-only file does not stop a rename over it, but a read-only
+	// directory stops the temp file.
+	locked := path
+	if runtime.GOOS != "windows" {
+		if os.Geteuid() == 0 {
+			t.Skip("root ignores directory permissions")
+		}
+		locked = filepath.Dir(path)
+	}
+	if err := os.Chmod(locked, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0700) })
+
+	if _, err := newClient(); err == nil || !strings.Contains(err.Error(), "must be writable") {
+		t.Fatalf("newClient = %v, want the writability error", err)
+	}
+}
 
 // validateBlogName protects filepath.Join from URL-derived blog slugs that
 // contain path traversal or separators. These tests pin the contract so future
