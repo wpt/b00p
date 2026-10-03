@@ -95,6 +95,14 @@ func newClient() (*boosty.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Boosty invalidates the old refresh token the moment a refresh succeeds,
+	// so a refreshed pair that cannot be saved is a credential at risk.
+	// Rewriting auth.json now makes a read-only file or directory, or a
+	// single-file Docker bind mount (rename onto it fails with EBUSY), stop
+	// the run before any API call.
+	if err := tokens.SaveTokens(authPath); err != nil {
+		return nil, fmt.Errorf("auth file must be writable (refreshed tokens are saved to it): %w", err)
+	}
 	c := boosty.NewClient(tokens, authPath)
 	c.Log = &stdLogger{}
 	return c, nil
