@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -67,6 +68,103 @@ func TestEngine_SavePost_HappyPathWritesAllArtefacts(t *testing.T) {
 	if string(img) != "FAKEIMAGE" {
 		t.Errorf("image bytes = %q, want FAKEIMAGE", string(img))
 	}
+}
+
+// post.json and comments.json must hold the API bytes, not a re-marshal of
+// the boosty structs: fields and block shapes the structs do not declare
+// (list items, smile name/URLs, link explicit, a block type nobody knows
+// yet) are otherwise gone for good once the post is deleted. The readers
+// that decode those files back must still work on the raw shape. Covers both
+// decode paths: the list endpoint (FetchPosts) and the per-post endpoint
+// (GetJSON, as --url uses it).
+func TestEngine_ArchivesRawPostAndComments(t *testing.T) {
+	const rawPost = `{"id":"p1","title":"Raw","hasAccess":true,"publishTime":1700000000,"updatedAt":1700000100,
+		"count":{"comments":2,"reactions":{"heart":3}},"isLiked":false,
+		"data":[
+			{"type":"list","style":"ordered","items":[{"data":[{"type":"text","content":"[\"one\",\"unstyled\",[]]","modificator":"BLOCK_END"}],"items":[]}]},
+			{"type":"smile","id":"s1","name":"cat","smallUrl":"https://s/c-s.png","mediumUrl":"https://s/c-m.png","largeUrl":"https://s/c-l.png","isAnimated":false},
+			{"type":"link","url":"https://e.com/<x>&y","content":"[\"l\",\"unstyled\",[]]","explicit":true},
+			{"type":"poll","id":"q1","options":[{"text":"да"}]}
+		]}`
+	const rawComment = `{"id":"c1","intId":1,"author":{"id":5,"name":"A"},"createdAt":1,"replyCount":1,
+		"data":[{"type":"smile","id":"s2","name":"dog","largeUrl":"https://s/d.png"}],"reactions":{"like":1},
+		"replies":{"data":[{"id":"r1","data":[],"isDeleted":false,"replyCount":0,"isBlocked":false}],"extra":{"isLast":true}}}`
+
+	for _, path := range []string{"list", "single"} {
+		t.Run(path, func(t *testing.T) {
+			blog := "myblog"
+			f := newFakeAPI(t)
+			f.HandleFunc("GET", "/v1/blog/"+blog+"/post/", func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"data":[%s],"extra":{"isLast":true}}`, rawPost)
+			})
+			f.HandleFunc("GET", "/v1/blog/"+blog+"/post/p1", func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, rawPost)
+			})
+			f.HandleFunc("GET", "/v1/blog/"+blog+"/post/p1/comment/", func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, `{"data":[%s],"extra":{"isLast":true}}`, rawComment)
+			})
+			cfg := Config{Blog: blog, OutputDir: t.TempDir(), WithComments: true}
+			e := New(f.client, cfg)
+
+			var dirName string
+			if path == "list" {
+				if err := e.DownloadAll(); err != nil {
+					t.Fatalf("DownloadAll: %v", err)
+				}
+				st, err := state.Load(filepath.Join(cfg.OutputDir, blog))
+				if err != nil {
+					t.Fatalf("load state: %v", err)
+				}
+				dirName = st.Posts["p1"].DirName
+			} else {
+				var post boosty.Post
+				if err := f.client.GetJSON(boosty.PostURL(blog, "p1"), &post); err != nil {
+					t.Fatalf("GetJSON: %v", err)
+				}
+				var err error
+				if dirName, _, err = e.SavePost(&post); err != nil {
+					t.Fatalf("SavePost: %v", err)
+				}
+			}
+			blogDir := filepath.Join(cfg.OutputDir, blog)
+			dir := filepath.Join(blogDir, dirName)
+
+			if got, want := compactFile(t, filepath.Join(dir, "post.json")), compactJSON(t, rawPost); got != want {
+				t.Errorf("post.json lost API content\n got %s\nwant %s", got, want)
+			}
+			if got, want := compactFile(t, filepath.Join(dir, "comments.json")), compactJSON(t, "["+rawComment+"]"); got != want {
+				t.Errorf("comments.json lost API content\n got %s\nwant %s", got, want)
+			}
+
+			if got, ok := readPostUpdatedAt(dir); !ok || got != 1700000100 {
+				t.Errorf("readPostUpdatedAt = %d, %v; want 1700000100, true", got, ok)
+			}
+			if !newDirReserver().diskOwnedBy(blogDir, dirName, "p1") || newDirReserver().diskOwnedBy(blogDir, dirName, "p2") {
+				t.Errorf("diskOwnedBy does not read the post id from the raw post.json")
+			}
+			if got, ok := diskCommentCount(dir); !ok || got != 2 {
+				t.Errorf("diskCommentCount = %d, %v; want 2, true", got, ok)
+			}
+		})
+	}
+}
+
+func compactJSON(t *testing.T, s string) string {
+	t.Helper()
+	var b bytes.Buffer
+	if err := json.Compact(&b, []byte(s)); err != nil {
+		t.Fatalf("compact %s: %v", s, err)
+	}
+	return b.String()
+}
+
+func compactFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return compactJSON(t, string(data))
 }
 
 // No-access posts must not write anything — including the blog directory.
