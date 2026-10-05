@@ -1,6 +1,9 @@
 package boosty
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // PostsResponse is the paginated list of posts from the API.
 type PostsResponse struct {
@@ -17,9 +20,6 @@ type PaginationExtra struct {
 
 // Post represents a single blog post.
 type Post struct {
-	// RawJSON holds an owned snapshot of the API response for lossless archival.
-	// It is excluded from ordinary JSON marshaling, which still uses typed fields.
-	RawJSON           json.RawMessage    `json:"-"`
 	ID                string             `json:"id"`
 	Title             string             `json:"title"`
 	CreatedAt         int64              `json:"createdAt"`
@@ -34,17 +34,24 @@ type Post struct {
 	Tags              []Tag              `json:"tags"`
 	Count             PostCount          `json:"count"`
 	SignedQuery       string             `json:"signedQuery"`
+	// Raw is the JSON the post was decoded from; nil for a Post built in
+	// code. The fields above model only what b00p reads, so post.json is
+	// written from Raw: re-marshalling the struct would drop every field
+	// and block shape it does not declare. Code that changes a decoded
+	// Post must clear Raw, or the stale bytes are what gets archived.
+	Raw json.RawMessage `json:"-"`
 }
 
-// UnmarshalJSON retains fields outside the typed model, including nested ones.
+// UnmarshalJSON decodes the post and keeps a copy of data in Raw.
 func (p *Post) UnmarshalJSON(data []byte) error {
-	type plainPost Post
-	var decoded plainPost
-	if err := json.Unmarshal(data, &decoded); err != nil {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain Post
+	if err := json.Unmarshal(data, (*plain)(p)); err != nil {
 		return err
 	}
-	*p = Post(decoded)
-	p.RawJSON = append(json.RawMessage(nil), data...)
+	p.Raw = bytes.Clone(data)
 	return nil
 }
 
@@ -147,6 +154,23 @@ type Comment struct {
 	IsDeleted  bool              `json:"isDeleted"`
 	ReplyCount int               `json:"replyCount"` // live (non-deleted) replies; Replies.Data includes stubs, so the two counts differ in either direction
 	Replies    *CommentsResponse `json:"replies,omitempty"`
+	// Raw is the JSON the comment was decoded from, replies included; nil
+	// for a Comment built in code. comments.json is written from it for the
+	// same reason as Post.Raw.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON decodes the comment and keeps a copy of data in Raw.
+func (c *Comment) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil
+	}
+	type plain Comment
+	if err := json.Unmarshal(data, (*plain)(c)); err != nil {
+		return err
+	}
+	c.Raw = bytes.Clone(data)
+	return nil
 }
 
 // CommentAuthor is the author of a comment.

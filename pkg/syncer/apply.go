@@ -301,7 +301,7 @@ func (e *Engine) runApplyActions(dir string, post *boosty.Post, mode downloader.
 	var errs []error
 
 	if actions.Post {
-		if err := writeJSON(filepath.Join(dir, "post.json"), post); err != nil {
+		if err := writeJSON(filepath.Join(dir, "post.json"), post.Raw, post); err != nil {
 			return out, fmt.Errorf("post.json: %w", err)
 		}
 		out.PostJSONOK = true
