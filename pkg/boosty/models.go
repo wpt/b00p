@@ -103,16 +103,9 @@ type PostCount struct {
 	Comments int `json:"comments"`
 }
 
-// ListItem is a list entry with content and nested entries.
-type ListItem struct {
-	Data  []ContentBlock `json:"data"`
-	Items []ListItem     `json:"items,omitempty"`
-}
-
-// ContentBlock is a piece of post content, including structured headings/lists.
+// ContentBlock is a piece of post content (text, image, video, link, list,
+// smile, ...).
 type ContentBlock struct {
-	Style          string      `json:"style,omitempty"`
-	Items          []ListItem  `json:"items,omitempty"`
 	Type           string      `json:"type"`
 	ID             string      `json:"id,omitempty"`
 	URL            string      `json:"url,omitempty"`
@@ -126,6 +119,18 @@ type ContentBlock struct {
 	Modificator    string      `json:"modificator,omitempty"`
 	Width          int         `json:"width,omitempty"`
 	Height         int         `json:"height,omitempty"`
+	// Style ("ordered" / "unordered") and Items are set on "list" blocks.
+	Style string     `json:"style,omitempty"`
+	Items []ListItem `json:"items,omitempty"`
+	// Name is a "smile" block's emoticon name.
+	Name string `json:"name,omitempty"`
+}
+
+// ListItem is one entry of a "list" block: its inline runs (text, link,
+// smile) and the nested list under it, which takes the parent block's Style.
+type ListItem struct {
+	Data  []ContentBlock `json:"data"`
+	Items []ListItem     `json:"items,omitempty"`
 }
 
 // PlayerURL is a video playback URL with quality type.

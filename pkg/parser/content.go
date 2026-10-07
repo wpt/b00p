@@ -7,6 +7,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -31,6 +32,8 @@ type MediaItem struct {
 
 // ParsedContent is the result of parsing a post's content blocks.
 type ParsedContent struct {
+	// TextParts are the post's text blocks as markdown, in reading order:
+	// paragraphs, headings ("## ...") and lists (one entry per list).
 	TextParts []string
 	// BodyParts contains Markdown paragraphs and media references in source order.
 	BodyParts []string
@@ -43,10 +46,10 @@ type ParsedContent struct {
 	// grab the missing video via yt-dlp on the HLS source or report it.
 	SkippedVideos int
 	// UnknownTypes lists block types ParseBlocks does not handle (unique,
-	// in first-seen order). Boosty keeps shipping new content kinds, and
-	// silently dropping one would leave an invisible hole in the archive.
-	// Callers should log the list so the user learns support is missing
-	// the moment it matters.
+	// in first-seen order; "list/<type>" for one inside a list item).
+	// Boosty keeps shipping new content kinds, and silently dropping one
+	// would leave an invisible hole in post.md. Callers should log the list
+	// so the user learns support is missing the moment it matters.
 	UnknownTypes []string
 }
 
@@ -73,227 +76,269 @@ var mp4QualityRank = map[string]int{
 // them lives at the run edges — trimming here would glue "see" to the link.
 // ParseBlocks trims the assembled paragraph instead.
 func ExtractText(raw string) string {
+	text, _ := parseDraft(raw)
+	return text
+}
+
+// parseDraft splits Draft.js content into its text and its block style, the
+// second element ("unstyled", "header-two", ...). Content that is not such an
+// array is the text itself, trimmed, with no style.
+func parseDraft(raw string) (text, style string) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return ""
+		return "", ""
 	}
 	if trimmed[0] == '[' {
 		var arr []json.RawMessage
 		if err := json.Unmarshal([]byte(trimmed), &arr); err == nil && len(arr) > 0 {
-			var text string
 			if err := json.Unmarshal(arr[0], &text); err == nil {
-				return text
+				if len(arr) > 1 && json.Unmarshal(arr[1], &style) != nil {
+					style = ""
+				}
+				return text, style
 			}
 		}
 	}
-	return trimmed
+	return trimmed, ""
 }
 
 // ParseBlocks extracts text and media from a post's content blocks.
 //
 // Text flow: the API delivers one visual paragraph as several consecutive
-// runs — e.g. text("see "), link("this post"), text(" for details") — closed
-// by a text block whose modificator is "BLOCK_END". Runs accumulate into one
-// TextParts entry and flush at each BLOCK_END; media and unknown blocks also
-// flush, so a paragraph can never span across an image. Joining is verbatim
-// (the author's spacing lives at the run edges), with a single trim of the
-// assembled paragraph.
+// inline runs (text, link and smile blocks) — e.g. text("see "),
+// link("this post"), text(" for details") — closed by a text block whose
+// modificator is "BLOCK_END". Runs accumulate into one TextParts entry and
+// flush at each BLOCK_END; every other block also flushes, so a paragraph can
+// never span across an image. Joining is verbatim (the author's spacing lives
+// at the run edges), with a single trim of the assembled paragraph. Header and
+// list blocks become TextParts entries of their own.
 func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 	var result ParsedContent
 	var imgIdx, vidIdx, audIdx, fileIdx int
 	var para []string
 
+	addText := func(s string) {
+		if s != "" {
+			result.TextParts = append(result.TextParts, s)
+		}
+	}
 	flushPara := func() {
-		if len(para) == 0 {
-			return
-		}
-		joined := strings.TrimSpace(strings.Join(para, ""))
+		addText(joinRuns(para))
 		para = para[:0]
-		if joined != "" {
-			result.TextParts = append(result.TextParts, joined)
-			result.BodyParts = append(result.BodyParts, joined)
+	}
+	unknown := func(typ string) {
+		if !slices.Contains(result.UnknownTypes, typ) {
+			result.UnknownTypes = append(result.UnknownTypes, typ)
 		}
 	}
 
-	addMedia := func(m MediaItem) {
-		result.Media = append(result.Media, m)
-		result.BodyParts = append(result.BodyParts, mediaMarkdown(m))
-	}
-
-	var walk func([]boosty.ContentBlock)
-	var walkList func([]boosty.ListItem, string)
-	walkList = func(items []boosty.ListItem, style string) {
-		var entries []string
-		for i, item := range items {
-			start := len(result.BodyParts)
-			walk(item.Data)
-			content := strings.Join(result.BodyParts[start:], "\n\n")
-			result.BodyParts = result.BodyParts[:start]
-			if len(item.Items) > 0 {
-				walkList(item.Items, style)
-				nested := strings.Join(result.BodyParts[start:], "\n")
-				result.BodyParts = result.BodyParts[:start]
-				if nested != "" {
-					if content != "" {
-						content += "\n"
-					}
-					content += nested
-				}
-			}
-			if content == "" {
-				continue
-			}
-			marker := "- "
-			if style == "ordered" {
-				marker = fmt.Sprintf("%d. ", i+1)
-			}
-			indent := strings.Repeat(" ", len(marker))
-			lines := strings.Split(content, "\n")
-			for j := 1; j < len(lines); j++ {
-				if lines[j] != "" {
-					lines[j] = indent + lines[j]
-				}
-			}
-			entries = append(entries, marker+strings.Join(lines, "\n"))
+	for _, block := range blocks {
+		if isBlockEnd(block) {
+			flushPara()
+			continue
 		}
-		if len(entries) > 0 {
-			result.BodyParts = append(result.BodyParts, strings.Join(entries, "\n"))
-		}
-	}
-
-	walk = func(blocks []boosty.ContentBlock) {
-		for _, block := range blocks {
-			switch block.Type {
-			case "text":
-				if block.Modificator == "BLOCK_END" {
-					flushPara()
-					continue
-				}
-				if text := ExtractText(block.Content); text != "" {
-					para = append(para, text)
-				}
-
-			case "header":
-				flushPara()
-				text := collapseWhitespace(ExtractText(block.Content))
-				if text == "" {
-					continue
-				}
-				var content []json.RawMessage
-				var style string
-				if json.Unmarshal([]byte(block.Content), &content) == nil && len(content) > 1 {
-					_ = json.Unmarshal(content[1], &style)
-				}
-				level := map[string]int{"header-one": 1, "header-two": 2, "header-three": 3,
-					"header-four": 4, "header-five": 5, "header-six": 6}[style]
-				if level == 0 {
-					level = 2
-				}
-				heading := strings.Repeat("#", level) + " " + text
-				result.TextParts = append(result.TextParts, heading)
-				result.BodyParts = append(result.BodyParts, heading)
-
-			case "list":
-				flushPara()
-				walkList(block.Items, block.Style)
-
-			case "image":
-				flushPara()
-				imgIdx++
-				imgURL := block.URL
-				if imgURL == "" {
-					continue
-				}
-				ext := imageExt(imgURL)
-				filename := fmt.Sprintf("image_%03d%s", imgIdx, ext)
-				addMedia(MediaItem{
-					Type:     "image",
-					URL:      imgURL,
-					Filename: filename,
-					ID:       block.ID,
-				})
-
-			case "ok_video":
-				flushPara()
-				vidIdx++
-				vidURL := BestMP4URL(block.PlayerURLs)
-				if vidURL == "" {
-					result.SkippedVideos++
-					continue
-				}
-				filename := fmt.Sprintf("video_%03d.mp4", vidIdx)
-				addMedia(MediaItem{
-					Type:     "video",
-					URL:      vidURL,
-					Filename: filename,
-					ID:       block.ID,
-				})
-
-			case "video":
-				flushPara()
-				vidIdx++
-				if block.URL != "" {
-					addMedia(MediaItem{
-						Type:     "external_video",
-						URL:      block.URL,
-						Filename: fmt.Sprintf("external_video_%03d", vidIdx),
-					})
-				}
-
-			case "audio_file":
-				flushPara()
-				audIdx++
-				if block.URL == "" {
-					continue
-				}
-				addMedia(MediaItem{
-					Type:     "audio",
-					URL:      block.URL,
-					Title:    block.Title,
-					Filename: fmt.Sprintf("audio_%03d%s", audIdx, attachmentExt(block.Title, block.URL, ".mp3")),
-					ID:       block.ID,
-				})
-
-			case "file":
-				flushPara()
-				fileIdx++
-				if block.URL == "" {
-					continue
-				}
-				addMedia(MediaItem{
-					Type:     "file",
-					URL:      block.URL,
-					Title:    block.Title,
-					Filename: fmt.Sprintf("file_%03d%s", fileIdx, attachmentExt(block.Title, block.URL, "")),
-					ID:       block.ID,
-				})
-
-			case "link":
-				text := ExtractText(block.Content)
-				if strings.TrimSpace(text) == "" {
-					text = block.URL
-				}
-				if text == "" {
-					// Neither label nor URL — nothing to archive.
-					continue
-				}
-				// formatMarkdownLink degrades to the bare escaped label when the
-				// URL is empty (editor artifact, dead link) — the author's text
-				// must not vanish from the archive with it.
-				para = append(para, formatMarkdownLink(text, block.URL))
-
-			default:
-				flushPara()
-				if !slices.Contains(result.UnknownTypes, block.Type) {
-					result.UnknownTypes = append(result.UnknownTypes, block.Type)
-				}
-			}
+		if run, ok := inlineRun(block); ok {
+			para = append(para, run)
+			continue
 		}
 		flushPara()
+
+		switch block.Type {
+		case "header":
+			addText(heading(block.Content))
+
+		case "list":
+			addText(renderList(block, unknown))
+
+		case "image":
+			imgIdx++
+			imgURL := block.URL
+			if imgURL == "" {
+				continue
+			}
+			ext := imageExt(imgURL)
+			filename := fmt.Sprintf("image_%03d%s", imgIdx, ext)
+			result.Media = append(result.Media, MediaItem{
+				Type:     "image",
+				URL:      imgURL,
+				Filename: filename,
+				ID:       block.ID,
+			})
+
+		case "ok_video":
+			vidIdx++
+			vidURL := BestMP4URL(block.PlayerURLs)
+			if vidURL == "" {
+				result.SkippedVideos++
+				continue
+			}
+			filename := fmt.Sprintf("video_%03d.mp4", vidIdx)
+			result.Media = append(result.Media, MediaItem{
+				Type:     "video",
+				URL:      vidURL,
+				Filename: filename,
+				ID:       block.ID,
+			})
+
+		case "video":
+			vidIdx++
+			if block.URL != "" {
+				result.Media = append(result.Media, MediaItem{
+					Type:     "external_video",
+					URL:      block.URL,
+					Filename: fmt.Sprintf("external_video_%03d", vidIdx),
+				})
+			}
+
+		case "audio_file":
+			audIdx++
+			if block.URL == "" {
+				continue
+			}
+			result.Media = append(result.Media, MediaItem{
+				Type:     "audio",
+				URL:      block.URL,
+				Title:    block.Title,
+				Filename: fmt.Sprintf("audio_%03d%s", audIdx, attachmentExt(block.Title, block.URL, ".mp3")),
+				ID:       block.ID,
+			})
+
+		case "file":
+			fileIdx++
+			if block.URL == "" {
+				continue
+			}
+			result.Media = append(result.Media, MediaItem{
+				Type:     "file",
+				URL:      block.URL,
+				Title:    block.Title,
+				Filename: fmt.Sprintf("file_%03d%s", fileIdx, attachmentExt(block.Title, block.URL, "")),
+				ID:       block.ID,
+			})
+
+		default:
+			unknown(block.Type)
+		}
 	}
-	walk(blocks)
+	flushPara()
 
 	return result
+}
+
+func isBlockEnd(block boosty.ContentBlock) bool {
+	return block.Type == "text" && block.Modificator == "BLOCK_END"
+}
+
+// inlineRun renders a block that sits inside a paragraph as markdown;
+// ok=false for any other block type. A smile renders as :name:, so a
+// sentence with an emoticon in it stays one paragraph.
+func inlineRun(block boosty.ContentBlock) (run string, ok bool) {
+	switch block.Type {
+	case "text":
+		return ExtractText(block.Content), true
+	case "link":
+		return linkRun(block), true
+	case "smile":
+		if block.Name == "" {
+			return "", true
+		}
+		return ":" + block.Name + ":", true
+	}
+	return "", false
+}
+
+// linkRun renders a link block. formatMarkdownLink degrades to the bare
+// escaped label when the URL is empty (editor artifact, dead link) — the
+// author's text must not vanish from the archive with it.
+func linkRun(block boosty.ContentBlock) string {
+	text := ExtractText(block.Content)
+	if strings.TrimSpace(text) == "" {
+		text = block.URL
+	}
+	if text == "" {
+		// Neither label nor URL — nothing to archive.
+		return ""
+	}
+	return formatMarkdownLink(text, block.URL)
+}
+
+// joinRuns assembles a paragraph from its inline runs.
+func joinRuns(runs []string) string {
+	return strings.TrimSpace(strings.Join(runs, ""))
+}
+
+// draftHeadingLevels maps the Draft.js block style of a header block's
+// content (["Title", "header-two", [...]]) to its heading level.
+var draftHeadingLevels = map[string]int{
+	"header-one":   1,
+	"header-two":   2,
+	"header-three": 3,
+	"header-four":  4,
+	"header-five":  5,
+	"header-six":   6,
+}
+
+// heading renders a header block as a one-line ATX heading. A header whose
+// style names no level stays a plain paragraph.
+func heading(content string) string {
+	text, style := parseDraft(content)
+	text = collapseWhitespace(text)
+	if level := draftHeadingLevels[style]; level > 0 && text != "" {
+		return strings.Repeat("#", level) + " " + text
+	}
+	return text
+}
+
+// renderList renders a list block as markdown: "N. " items for the "ordered"
+// style, "- " for anything else, nested items indented to their parent's
+// text. An item's Data holds inline runs, and a BLOCK_END inside it breaks
+// the line. Any other block in an item is reported to unknown as
+// "list/<type>": its content is not rendered.
+func renderList(block boosty.ContentBlock, unknown func(string)) string {
+	var lines []string
+	var walk func(items []boosty.ListItem, indent string)
+	walk = func(items []boosty.ListItem, indent string) {
+		for i, item := range items {
+			marker := "- "
+			if block.Style == "ordered" {
+				marker = strconv.Itoa(i+1) + ". "
+			}
+			cont := indent + strings.Repeat(" ", len(marker))
+			for j, line := range strings.Split(itemText(item.Data, unknown), "\n") {
+				switch {
+				case j == 0 && line == "":
+					lines = append(lines, indent+strings.TrimSuffix(marker, " "))
+				case j == 0:
+					lines = append(lines, indent+marker+line)
+				case strings.Trim(line, " \t") == "":
+					lines = append(lines, "")
+				default:
+					lines = append(lines, cont+line)
+				}
+			}
+			walk(item.Items, cont)
+		}
+	}
+	walk(block.Items, "")
+	return strings.Join(lines, "\n")
+}
+
+// itemText assembles a list item's inline runs into its text.
+func itemText(data []boosty.ContentBlock, unknown func(string)) string {
+	var runs []string
+	for _, block := range data {
+		if isBlockEnd(block) {
+			runs = append(runs, "\n")
+			continue
+		}
+		run, ok := inlineRun(block)
+		if !ok {
+			unknown("list/" + block.Type)
+			continue
+		}
+		runs = append(runs, run)
+	}
+	return joinRuns(runs)
 }
 
 // imageExt picks an extension for a downloaded image. Boosty image URLs are
