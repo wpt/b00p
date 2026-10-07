@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -482,5 +483,117 @@ func TestParseBlocks_NoUnknownTypesOnKnownBlocks(t *testing.T) {
 	}
 	if got := ParseBlocks(blocks).UnknownTypes; len(got) != 0 {
 		t.Errorf("UnknownTypes = %v, want empty for fully supported blocks", got)
+	}
+}
+
+// decodeBlocks builds fixtures from JSON so the struct tags are pinned along
+// with the parser. Shapes follow the independent clients: boosty_api
+// (src/model/post.rs: ListData{style, items: [ListItem{data, items}]},
+// SmileData{name, smallUrl, ...}) and Glitchy-Sheep/boosty-downloader
+// (post_data_list.py, post_data_header.py: header content carries the
+// Draft.js style "header-one".."header-six").
+func decodeBlocks(t *testing.T, s string) []boosty.ContentBlock {
+	t.Helper()
+	var blocks []boosty.ContentBlock
+	if err := json.Unmarshal([]byte(s), &blocks); err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	return blocks
+}
+
+// A list used to be dropped from post.md entirely ("Contents:" and nothing
+// after it). Items render as markdown list lines, numbered for "ordered",
+// with nested items indented to their parent's text.
+func TestParseBlocks_List(t *testing.T) {
+	blocks := decodeBlocks(t, `[
+		{"type":"text","content":"[\"Contents:\",\"unstyled\",[]]","modificator":""},
+		{"type":"text","content":"","modificator":"BLOCK_END"},
+		{"type":"list","style":"unordered","items":[
+			{"data":[{"type":"text","content":"[\"one\",\"unstyled\",[]]","modificator":""},
+			         {"type":"text","content":"","modificator":"BLOCK_END"}],
+			 "items":[{"data":[{"type":"text","content":"[\"one.a\",\"unstyled\",[]]"}],"items":[]}]},
+			{"data":[{"type":"link","url":"https://e.com","content":"[\"two\",\"unstyled\",[]]"}],"items":[]}
+		]},
+		{"type":"list","style":"ordered","items":[
+			{"data":[{"type":"text","content":"[\"first\",\"unstyled\",[]]"}],
+			 "items":[{"data":[{"type":"text","content":"[\"nested\",\"unstyled\",[]]"}]}]},
+			{"data":[{"type":"text","content":"[\"second\",\"unstyled\",[]]"}]}
+		]}
+	]`)
+	got := ParseBlocks(blocks)
+	want := []string{
+		"Contents:",
+		"- one\n  - one.a\n- [two](<https://e.com>)",
+		"1. first\n   1. nested\n2. second",
+	}
+	if !slices.Equal(got.TextParts, want) {
+		t.Errorf("TextParts = %q\nwant %q", got.TextParts, want)
+	}
+	if len(got.UnknownTypes) != 0 {
+		t.Errorf("UnknownTypes = %v, want empty", got.UnknownTypes)
+	}
+}
+
+// Edge shapes: an unknown style falls back to bullets (as boosty-downloader
+// does), an item with only a nested list keeps an empty marker, a second
+// line inside an item stays under the item, and a non-inline block inside
+// an item is reported instead of vanishing silently.
+func TestParseBlocks_ListItemEdges(t *testing.T) {
+	blocks := decodeBlocks(t, `[
+		{"type":"list","style":"checklist","items":[
+			{"data":[],"items":[{"data":[{"type":"text","content":"[\"child\",\"unstyled\",[]]"}]}]},
+			{"data":[{"type":"text","content":"[\"a\",\"unstyled\",[]]"},
+			         {"type":"text","content":"","modificator":"BLOCK_END"},
+			         {"type":"text","content":"[\"b\",\"unstyled\",[]]"}]},
+			{"data":[{"type":"image","url":"https://images.boosty.to/image/x.jpg"}]}
+		]}
+	]`)
+	got := ParseBlocks(blocks)
+	want := []string{"-\n  - child\n- a\n  b\n-"}
+	if !slices.Equal(got.TextParts, want) {
+		t.Errorf("TextParts = %q\nwant %q", got.TextParts, want)
+	}
+	if want := []string{"list/image"}; !slices.Equal(got.UnknownTypes, want) {
+		t.Errorf("UnknownTypes = %v, want %v", got.UnknownTypes, want)
+	}
+}
+
+// A smile sits between text runs. It used to flush the paragraph, splitting
+// "Nice :) right?" into "Nice" and "right?"; it now renders inline.
+func TestParseBlocks_SmileInline(t *testing.T) {
+	blocks := decodeBlocks(t, `[
+		{"type":"text","content":"[\"Nice \",\"unstyled\",[]]","modificator":""},
+		{"type":"smile","id":"abc","name":"heart","smallUrl":"https://s/h-s.png","mediumUrl":"https://s/h-m.png","largeUrl":"https://s/h-l.png","isAnimated":false},
+		{"type":"text","content":"[\" right?\",\"unstyled\",[]]","modificator":""},
+		{"type":"smile","id":"nameless"},
+		{"type":"text","content":"","modificator":"BLOCK_END"}
+	]`)
+	got := ParseBlocks(blocks)
+	if want := []string{"Nice :heart: right?"}; !slices.Equal(got.TextParts, want) {
+		t.Errorf("TextParts = %q, want %q", got.TextParts, want)
+	}
+	if len(got.UnknownTypes) != 0 {
+		t.Errorf("UnknownTypes = %v, want empty", got.UnknownTypes)
+	}
+}
+
+// A header block is its own markdown heading at the level its Draft.js
+// style names, on one line; one with no heading style stays a paragraph.
+func TestParseBlocks_Header(t *testing.T) {
+	blocks := decodeBlocks(t, `[
+		{"type":"text","content":"[\"intro\",\"unstyled\",[]]","modificator":""},
+		{"type":"header","content":"[\"Chapter\\none\",\"header-two\",[[0,0,11]]]","modificator":""},
+		{"type":"text","content":"[\"body\",\"unstyled\",[]]","modificator":""},
+		{"type":"text","content":"","modificator":"BLOCK_END"},
+		{"type":"header","content":"[\"Top\",\"header-one\",[]]","modificator":"BLOCK_END"},
+		{"type":"header","content":"[\"Plain\",\"unstyled\",[]]","modificator":""}
+	]`)
+	got := ParseBlocks(blocks)
+	want := []string{"intro", "## Chapter one", "body", "# Top", "Plain"}
+	if !slices.Equal(got.TextParts, want) {
+		t.Errorf("TextParts = %q, want %q", got.TextParts, want)
+	}
+	if len(got.UnknownTypes) != 0 {
+		t.Errorf("UnknownTypes = %v, want empty", got.UnknownTypes)
 	}
 }
