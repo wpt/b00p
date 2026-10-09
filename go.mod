@@ -1,6 +1,6 @@
 module github.com/wpt/b00p
 
-go 1.26.8
+go 1.26.9
 
 require github.com/spf13/cobra v1.10.2
 
