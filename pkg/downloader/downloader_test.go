@@ -1,13 +1,16 @@
 package downloader
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -327,11 +330,7 @@ func TestDownloadExternal_MissingYTDLP(t *testing.T) {
 }
 
 func TestDownloadExternal_CreatesDir(t *testing.T) {
-	fakeDir, ytdlp := installFakeYTDLP(t)
-	t.Setenv("PATH", fakeDir)
-	if filepath.Ext(ytdlp) == ".bat" {
-		t.Setenv("PATHEXT", ".BAT")
-	}
+	installFakeYTDLP(t)
 
 	log := &recordingLogger{}
 	dir := filepath.Join(t.TempDir(), "missing", "nested")
@@ -346,60 +345,40 @@ func TestDownloadExternal_CreatesDir(t *testing.T) {
 	}
 }
 
-// TestDownloadExternal_HostileURLNotInterpretedAsFlag pins the `--` stop-parsing
-// contract: a post that embeds a URL starting with `-` (or `--exec=...`-style
-// payload) must not be smuggled to yt-dlp as a flag. We replace yt-dlp with a
-// stub that echoes its argv; the stub fails with a marker exit so we get the
-// error path AND can inspect the produced command via CombinedOutput, captured
-// indirectly through the joined log.
-//
-// Strategy: install a fake yt-dlp on PATH that prints argv then exits 1.
-// DownloadExternal logs CombinedOutput on failure, so log lines carry the argv.
-func TestDownloadExternal_HostileURLNotInterpretedAsFlag(t *testing.T) {
-	fakeDir, ytdlp := installFakeYTDLP(t)
-	t.Setenv("PATH", fakeDir)
-	// On Windows we install yt-dlp.bat — make sure PATHEXT recognises .BAT.
-	if filepath.Ext(ytdlp) == ".bat" {
-		t.Setenv("PATHEXT", ".BAT")
-	}
+// TestDownloadExternal_SeparatorBeforeURL pins the `--` that ends yt-dlp's
+// option parsing: the post-supplied URL must be the last argument, directly
+// after `--`, or a URL such as `--exec=...` would be parsed as a yt-dlp flag.
+func TestDownloadExternal_SeparatorBeforeURL(t *testing.T) {
+	installFakeYTDLP(t)
+	argvFile := filepath.Join(t.TempDir(), "argv.json")
+	t.Setenv("FAKE_YTDLP_ARGV", argvFile)
 
-	log := &recordingLogger{}
-	media := []parser.MediaItem{
-		{Type: "external_video", URL: "--exec=rm -rf /", Filename: "hostile"},
-	}
-	err := DownloadExternal(log, media, t.TempDir())
+	const videoURL = "https://youtu.be/abc"
+	err := DownloadExternal(&recordingLogger{}, []parser.MediaItem{
+		{Type: "external_video", URL: videoURL, Filename: "ext"},
+	}, t.TempDir())
 	if err == nil {
 		t.Fatal("expected non-nil error from failing fake yt-dlp")
 	}
 
-	out := log.joined()
-	// The hostile URL must appear AFTER a `--` separator in argv so yt-dlp
-	// treats it as a positional. The fake prints args verbatim; if `--` is
-	// missing or precedes `-o`, real yt-dlp would parse `--exec=...` as a
-	// flag and execute attacker code.
-	if !strings.Contains(out, "--") {
-		t.Errorf("argv missing `--` separator: %q", out)
+	raw, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("fake yt-dlp did not record argv: %v", err)
 	}
-	if !strings.Contains(out, "--exec=rm -rf /") {
-		t.Errorf("hostile URL not present in argv as positional: %q", out)
+	var argv []string
+	if err := json.Unmarshal(raw, &argv); err != nil {
+		t.Fatalf("decode argv %q: %v", raw, err)
 	}
-	// Sanity: the `-o` template must still be there.
-	if !strings.Contains(out, "hostile.%(ext)s") {
-		t.Errorf("output template missing: %q", out)
-	}
-	if !strings.Contains(out, "--no-playlist") {
-		t.Errorf("argv missing --no-playlist: %q", out)
+	want := []string{"--no-playlist", "-o", "ext.%(ext)s", "--", videoURL}
+	if !slices.Equal(argv, want) {
+		t.Errorf("yt-dlp argv = %q, want %q", argv, want)
 	}
 }
 
 // TestDownloadExternal_AggregatesFailures runs two external items with a fake
 // yt-dlp that always fails; errors.Join must surface both URLs.
 func TestDownloadExternal_AggregatesFailures(t *testing.T) {
-	fakeDir, ytdlp := installFakeYTDLP(t)
-	t.Setenv("PATH", fakeDir)
-	if filepath.Ext(ytdlp) == ".bat" {
-		t.Setenv("PATHEXT", ".BAT")
-	}
+	installFakeYTDLP(t)
 
 	log := &recordingLogger{}
 	media := []parser.MediaItem{
@@ -431,28 +410,42 @@ func TestDownloadExternal_AggregatesFailures(t *testing.T) {
 	_ = errors.Unwrap // import sanity; errors.Join error doesn't unwrap to single
 }
 
-// installFakeYTDLP drops an executable named yt-dlp (or yt-dlp.bat on Windows)
-// into a fresh temp directory and returns (dir, executablePath). The fake
-// prints its argv to stdout then exits 1, so callers can inspect argv via
-// CombinedOutput / the logger and observe the error path.
-func installFakeYTDLP(t *testing.T) (string, string) {
+// fakeYTDLPSrc always exits 1; when FAKE_YTDLP_ARGV is set it first writes
+// its argv there as a JSON array.
+const fakeYTDLPSrc = `package main
+
+import (
+	"encoding/json"
+	"os"
+)
+
+func main() {
+	if p := os.Getenv("FAKE_YTDLP_ARGV"); p != "" {
+		b, _ := json.Marshal(os.Args[1:])
+		_ = os.WriteFile(p, b, 0o644)
+	}
+	os.Exit(1)
+}
+`
+
+// installFakeYTDLP builds fakeYTDLPSrc as yt-dlp (yt-dlp.exe on Windows) and
+// makes its directory the whole PATH. A compiled fake records argv exactly as
+// exec passed it, which echo in a shell or batch script cannot.
+func installFakeYTDLP(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	var (
-		name    string
-		content string
-	)
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(fakeYTDLPSrc), 0o644); err != nil {
+		t.Fatalf("write fake yt-dlp source: %v", err)
+	}
+	binDir := t.TempDir()
+	name := "yt-dlp"
 	if isWindows() {
-		name = "yt-dlp.bat"
-		// `@echo off` prevents the prompt from echoing each line; %* prints argv.
-		content = "@echo off\r\necho %*\r\nexit /b 1\r\n"
-	} else {
-		name = "yt-dlp"
-		content = "#!/bin/sh\necho \"$@\"\nexit 1\n"
+		name += ".exe"
 	}
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
-		t.Fatalf("write fake yt-dlp: %v", err)
+	build := exec.Command("go", "build", "-o", filepath.Join(binDir, name), "main.go")
+	build.Dir = srcDir
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build fake yt-dlp: %v\n%s", err, out)
 	}
-	return dir, path
+	t.Setenv("PATH", binDir)
 }
