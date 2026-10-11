@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -349,9 +349,7 @@ func TestDownloadExternal_CreatesDir(t *testing.T) {
 // option parsing: the post-supplied URL must be the last argument, directly
 // after `--`, or a URL such as `--exec=...` would be parsed as a yt-dlp flag.
 func TestDownloadExternal_SeparatorBeforeURL(t *testing.T) {
-	installFakeYTDLP(t)
-	argvFile := filepath.Join(t.TempDir(), "argv.json")
-	t.Setenv("FAKE_YTDLP_ARGV", argvFile)
+	calls := installFakeYTDLP(t)
 
 	const videoURL = "https://youtu.be/abc"
 	err := DownloadExternal(&recordingLogger{}, []parser.MediaItem{
@@ -361,17 +359,37 @@ func TestDownloadExternal_SeparatorBeforeURL(t *testing.T) {
 		t.Fatal("expected non-nil error from failing fake yt-dlp")
 	}
 
-	raw, err := os.ReadFile(argvFile)
-	if err != nil {
-		t.Fatalf("fake yt-dlp did not record argv: %v", err)
+	want := [][]string{{"--no-playlist", "-o", "ext.%(ext)s", "--", videoURL}}
+	if got := calls(); !reflect.DeepEqual(got, want) {
+		t.Errorf("yt-dlp calls = %q, want %q", got, want)
 	}
-	var argv []string
-	if err := json.Unmarshal(raw, &argv); err != nil {
-		t.Fatalf("decode argv %q: %v", raw, err)
+}
+
+// TestDownloadExternal_SkipsNonHTTPURL: an item whose URL is not http(s) is
+// reported in the error and never reaches yt-dlp, and later items still run.
+func TestDownloadExternal_SkipsNonHTTPURL(t *testing.T) {
+	calls := installFakeYTDLP(t)
+
+	bad := []string{"--exec=rm -rf /", "file:///etc/passwd", "ftp://example.com/v.mp4"}
+	var media []parser.MediaItem
+	for i, u := range bad {
+		media = append(media, parser.MediaItem{Type: "external_video", URL: u, Filename: fmt.Sprintf("bad%d", i)})
 	}
-	want := []string{"--no-playlist", "-o", "ext.%(ext)s", "--", videoURL}
-	if !slices.Equal(argv, want) {
-		t.Errorf("yt-dlp argv = %q, want %q", argv, want)
+	const goodURL = "https://youtu.be/ok"
+	media = append(media, parser.MediaItem{Type: "external_video", URL: goodURL, Filename: "ok"})
+
+	err := DownloadExternal(&recordingLogger{}, media, t.TempDir())
+	if err == nil {
+		t.Fatal("DownloadExternal: nil, want error listing the skipped URLs")
+	}
+	for _, u := range bad {
+		if !strings.Contains(err.Error(), fmt.Sprintf("%q: not an http(s) URL", u)) {
+			t.Errorf("error %q does not report skipped URL %q", err, u)
+		}
+	}
+	want := [][]string{{"--no-playlist", "-o", "ok.%(ext)s", "--", goodURL}}
+	if got := calls(); !reflect.DeepEqual(got, want) {
+		t.Errorf("yt-dlp calls = %q, want only the https item %q", got, want)
 	}
 }
 
@@ -410,8 +428,8 @@ func TestDownloadExternal_AggregatesFailures(t *testing.T) {
 	_ = errors.Unwrap // import sanity; errors.Join error doesn't unwrap to single
 }
 
-// fakeYTDLPSrc always exits 1; when FAKE_YTDLP_ARGV is set it first writes
-// its argv there as a JSON array.
+// fakeYTDLPSrc appends its argv as one JSON array per line to
+// $FAKE_YTDLP_ARGV, then exits 1.
 const fakeYTDLPSrc = `package main
 
 import (
@@ -420,18 +438,20 @@ import (
 )
 
 func main() {
-	if p := os.Getenv("FAKE_YTDLP_ARGV"); p != "" {
-		b, _ := json.Marshal(os.Args[1:])
-		_ = os.WriteFile(p, b, 0o644)
+	b, _ := json.Marshal(os.Args[1:])
+	if f, err := os.OpenFile(os.Getenv("FAKE_YTDLP_ARGV"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		f.Write(append(b, '\n'))
+		f.Close()
 	}
 	os.Exit(1)
 }
 `
 
-// installFakeYTDLP builds fakeYTDLPSrc as yt-dlp (yt-dlp.exe on Windows) and
-// makes its directory the whole PATH. A compiled fake records argv exactly as
+// installFakeYTDLP builds fakeYTDLPSrc as yt-dlp (yt-dlp.exe on Windows),
+// makes its directory the whole PATH, and returns a func that reads back the
+// argv of every invocation so far. A compiled fake records argv exactly as
 // exec passed it, which echo in a shell or batch script cannot.
-func installFakeYTDLP(t *testing.T) {
+func installFakeYTDLP(t *testing.T) func() [][]string {
 	t.Helper()
 	srcDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(srcDir, "main.go"), []byte(fakeYTDLPSrc), 0o644); err != nil {
@@ -448,4 +468,26 @@ func installFakeYTDLP(t *testing.T) {
 		t.Fatalf("build fake yt-dlp: %v\n%s", err, out)
 	}
 	t.Setenv("PATH", binDir)
+	argvLog := filepath.Join(t.TempDir(), "argv.jsonl")
+	t.Setenv("FAKE_YTDLP_ARGV", argvLog)
+
+	return func() [][]string {
+		t.Helper()
+		raw, err := os.ReadFile(argvLog)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("read fake yt-dlp argv log: %v", err)
+		}
+		var calls [][]string
+		for line := range strings.Lines(string(raw)) {
+			var argv []string
+			if err := json.Unmarshal([]byte(line), &argv); err != nil {
+				t.Fatalf("decode argv line %q: %v", line, err)
+			}
+			calls = append(calls, argv)
+		}
+		return calls
+	}
 }

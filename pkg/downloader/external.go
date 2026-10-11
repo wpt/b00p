@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -42,10 +46,22 @@ func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) e
 	if err != nil {
 		return fmt.Errorf("yt-dlp not found in PATH. Install it: pip install yt-dlp")
 	}
+	// Windows runs .bat/.cmd through cmd.exe, and Go's argument quoting leaves
+	// `&`, `|` and `>` bare, so a post URL like `...?v=x&calc` would run calc.
+	if runtime.GOOS == "windows" {
+		if ext := filepath.Ext(ytdlp); strings.EqualFold(ext, ".bat") || strings.EqualFold(ext, ".cmd") {
+			return fmt.Errorf("yt-dlp resolves to a batch wrapper (%s), which would let cmd.exe run commands hidden in post URLs. Install yt-dlp.exe (pip install yt-dlp ships one) and put it first in PATH", ytdlp)
+		}
+	}
 
 	var errs []error
 	for _, m := range media {
 		if m.Type != "external_video" {
+			continue
+		}
+		if u, err := url.Parse(m.URL); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			log.Printf("  warning: skipping external video with non-http(s) URL %q", m.URL)
+			errs = append(errs, fmt.Errorf("%q: not an http(s) URL", m.URL))
 			continue
 		}
 		log.Printf("  downloading external video: %s", m.URL)
