@@ -126,6 +126,40 @@ func TestGenerateMarkdown_BodyLinks(t *testing.T) {
 	}
 }
 
+// post.md used to print every paragraph first and every image after them,
+// separating each caption from its picture. Media now sits where its block
+// sat, including media before the first and after the last paragraph.
+func TestGenerateMarkdown_KeepsBlockOrder(t *testing.T) {
+	post := &boosty.Post{ID: "abc", Title: "T", PublishTime: 1700000000}
+	parsed := ParseBlocks([]boosty.ContentBlock{
+		{Type: "image", URL: "https://images.boosty.to/image/0.jpg"},
+		{Type: "text", Content: `["Step 1: open the lid","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "image", URL: "https://images.boosty.to/image/a.jpg"},
+		{Type: "text", Content: `["Step 2: pour water","unstyled",[]]`},
+		{Type: "image", URL: "https://images.boosty.to/image/b.jpg"},
+		{Type: "video", URL: "https://youtube.com/watch?v=1"},
+	})
+
+	md := GenerateMarkdown(post, parsed)
+	order := []string{
+		"![image_001.jpg]",
+		"Step 1: open the lid",
+		"![image_002.jpg]",
+		"Step 2: pour water",
+		"![image_003.jpg]",
+		"[External Video]",
+	}
+	last := -1
+	for _, s := range order {
+		i := strings.Index(md, s)
+		if i <= last {
+			t.Fatalf("%q out of order (index %d, previous %d)\n%s", s, i, last, md)
+		}
+		last = i
+	}
+}
+
 func TestGenerateMarkdown_Attachments(t *testing.T) {
 	post := &boosty.Post{
 		ID:          "abc",

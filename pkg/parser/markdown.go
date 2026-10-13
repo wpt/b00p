@@ -50,36 +50,41 @@ func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 	// split the H1 across lines.
 	b.WriteString(fmt.Sprintf("# %s\n\n", collapseWhitespace(post.Title)))
 
-	parts := parsed.BodyParts
-	if parts == nil {
-		// Keep callers that assemble ParsedContent themselves working.
-		parts = append(parts, parsed.TextParts...)
-		for _, m := range parsed.Media {
-			parts = append(parts, mediaMarkdown(m))
+	// Body in block order: each media reference goes after the TextBefore
+	// text entries that precede it. Media left over (TextBefore past the
+	// end, possible only in a hand-built ParsedContent) goes last.
+	mi := 0
+	for i, text := range parsed.TextParts {
+		for ; mi < len(parsed.Media) && parsed.Media[mi].TextBefore <= i; mi++ {
+			writeMediaRef(&b, parsed.Media[mi])
 		}
-	}
-	for _, part := range parts {
-		b.WriteString(part)
+		b.WriteString(text)
 		b.WriteString("\n\n")
+	}
+	for _, m := range parsed.Media[mi:] {
+		writeMediaRef(&b, m)
 	}
 
 	return b.String()
 }
 
-func mediaMarkdown(m MediaItem) string {
+// writeMediaRef writes the markdown reference to one media item.
+func writeMediaRef(b *strings.Builder, m MediaItem) {
 	switch m.Type {
 	case "image":
-		return fmt.Sprintf("![%s](%s)", m.Filename, m.Filename)
+		// m.Filename is parser-generated ("image_001.jpg") — no markdown
+		// metacharacters possible, so no escaping is needed.
+		fmt.Fprintf(b, "![%s](%s)\n\n", m.Filename, m.Filename)
 	case "video":
-		return fmt.Sprintf("[Video: %s](%s)", m.Filename, m.Filename)
+		fmt.Fprintf(b, "[Video: %s](%s)\n\n", m.Filename, m.Filename)
 	case "audio":
-		return fmt.Sprintf("[Audio: %s](%s)", attachmentLabel(m), m.Filename)
+		fmt.Fprintf(b, "[Audio: %s](%s)\n\n", attachmentLabel(m), m.Filename)
 	case "file":
-		return fmt.Sprintf("[File: %s](%s)", attachmentLabel(m), m.Filename)
+		fmt.Fprintf(b, "[File: %s](%s)\n\n", attachmentLabel(m), m.Filename)
 	case "external_video":
-		return formatMarkdownLink("External Video", m.URL)
+		b.WriteString(formatMarkdownLink("External Video", m.URL))
+		b.WriteString("\n\n")
 	}
-	return ""
 }
 
 // attachmentLabel is the link label for an audio/file attachment: the

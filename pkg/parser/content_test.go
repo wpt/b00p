@@ -486,6 +486,27 @@ func TestParseBlocks_NoUnknownTypesOnKnownBlocks(t *testing.T) {
 	}
 }
 
+// TextBefore records how many text entries precede each media item, so
+// GenerateMarkdown can put the item back where its block was.
+func TestParseBlocks_MediaTextBefore(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "image", URL: "https://images.boosty.to/image/0.jpg"},
+		{Type: "text", Content: `["one","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "text", Content: `["two","unstyled",[]]`},
+		{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{{Type: "high", URL: "https://example.com/v.mp4"}}},
+		{Type: "list", Items: []boosty.ListItem{{Data: []boosty.ContentBlock{{Type: "text", Content: `["item","unstyled",[]]`}}}}},
+		{Type: "file", URL: "https://example.com/f", Title: "f.pdf"},
+	}
+	var got []int
+	for _, m := range ParseBlocks(blocks).Media {
+		got = append(got, m.TextBefore)
+	}
+	if want := []int{0, 2, 3}; !slices.Equal(got, want) {
+		t.Errorf("TextBefore = %v, want %v", got, want)
+	}
+}
+
 // decodeBlocks builds fixtures from JSON so the struct tags are pinned along
 // with the parser. Shapes follow the independent clients: boosty_api
 // (src/model/post.rs: ListData{style, items: [ListItem{data, items}]},
