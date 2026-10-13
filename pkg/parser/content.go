@@ -28,6 +28,11 @@ type MediaItem struct {
 	// (the original filename as uploaded); used as the link label in
 	// generated markdown. Empty for other media types.
 	Title string
+	// TextBefore is the number of ParsedContent.TextParts entries that come
+	// before the item in block order; GenerateMarkdown places the item after
+	// them. ParseBlocks sets it. A caller building ParsedContent by hand gets
+	// the zero value, which puts the item before all text.
+	TextBefore int
 }
 
 // ParsedContent is the result of parsing a post's content blocks.
@@ -35,8 +40,6 @@ type ParsedContent struct {
 	// TextParts are the post's text blocks as markdown, in reading order:
 	// paragraphs, headings ("## ...") and lists (one entry per list).
 	TextParts []string
-	// BodyParts contains Markdown paragraphs and media references in source order.
-	BodyParts []string
 	Media     []MediaItem
 	// SkippedVideos counts ok_video blocks that had no usable MP4 URL
 	// (only HLS/DASH variants, or every MP4 URL was empty). The block was
@@ -126,6 +129,12 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 		addText(joinRuns(para))
 		para = para[:0]
 	}
+	// Every media block is preceded by a flush, so the open paragraph is
+	// already counted and TextBefore is exact.
+	addMedia := func(m MediaItem) {
+		m.TextBefore = len(result.TextParts)
+		result.Media = append(result.Media, m)
+	}
 	unknown := func(typ string) {
 		if !slices.Contains(result.UnknownTypes, typ) {
 			result.UnknownTypes = append(result.UnknownTypes, typ)
@@ -158,7 +167,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			}
 			ext := imageExt(imgURL)
 			filename := fmt.Sprintf("image_%03d%s", imgIdx, ext)
-			result.Media = append(result.Media, MediaItem{
+			addMedia(MediaItem{
 				Type:     "image",
 				URL:      imgURL,
 				Filename: filename,
@@ -173,7 +182,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 				continue
 			}
 			filename := fmt.Sprintf("video_%03d.mp4", vidIdx)
-			result.Media = append(result.Media, MediaItem{
+			addMedia(MediaItem{
 				Type:     "video",
 				URL:      vidURL,
 				Filename: filename,
@@ -183,7 +192,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 		case "video":
 			vidIdx++
 			if block.URL != "" {
-				result.Media = append(result.Media, MediaItem{
+				addMedia(MediaItem{
 					Type:     "external_video",
 					URL:      block.URL,
 					Filename: fmt.Sprintf("external_video_%03d", vidIdx),
@@ -195,7 +204,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			if block.URL == "" {
 				continue
 			}
-			result.Media = append(result.Media, MediaItem{
+			addMedia(MediaItem{
 				Type:     "audio",
 				URL:      block.URL,
 				Title:    block.Title,
@@ -208,7 +217,7 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			if block.URL == "" {
 				continue
 			}
-			result.Media = append(result.Media, MediaItem{
+			addMedia(MediaItem{
 				Type:     "file",
 				URL:      block.URL,
 				Title:    block.Title,
