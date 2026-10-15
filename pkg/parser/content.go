@@ -258,22 +258,46 @@ func inlineRun(block boosty.ContentBlock) (run string, ok bool) {
 
 // linkRun renders a link block. formatMarkdownLink degrades to the bare
 // escaped label when the URL is empty (editor artifact, dead link) — the
-// author's text must not vanish from the archive with it.
+// author's text must not vanish from the archive with it. The label's edge
+// whitespace is the spacing to the neighbouring runs, which
+// EscapeMarkdownLabel would trim, so it stays outside the link.
 func linkRun(block boosty.ContentBlock) string {
 	text := ExtractText(block.Content)
-	if strings.TrimSpace(text) == "" {
-		text = block.URL
+	label := strings.TrimSpace(text)
+	lead := text[:len(text)-len(strings.TrimLeftFunc(text, unicode.IsSpace))]
+	trail := text[len(lead)+len(label):]
+	if label == "" {
+		label = block.URL
 	}
-	if text == "" {
-		// Neither label nor URL — nothing to archive.
-		return ""
+	if label == "" {
+		// Neither label nor URL — nothing to archive but the spacing.
+		return lead
 	}
-	return formatMarkdownLink(text, block.URL)
+	return lead + formatMarkdownLink(label, block.URL) + trail
 }
 
-// joinRuns assembles a paragraph from its inline runs.
+var lineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
+// joinRuns assembles a paragraph from its inline runs. Boosty sends a line
+// break typed inside a paragraph as "\n" in a run, which CommonMark renders
+// as a space, so a lone "\n" between two lines of text becomes a hard break.
+// Two trailing spaces, not a backslash: before a line that opens a block
+// ("- ", "1. ", "#") a backslash shows up literally.
 func joinRuns(runs []string) string {
-	return strings.TrimSpace(strings.Join(runs, ""))
+	s := strings.TrimSpace(lineEndings.Replace(strings.Join(runs, "")))
+	lines := strings.Split(s, "\n")
+	for i := range len(lines) - 1 {
+		if !isBlankLine(lines[i]) && !isBlankLine(lines[i+1]) {
+			lines[i] += "  "
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// isBlankLine uses CommonMark's definition: only spaces and tabs, so a line
+// holding an NBSP is text.
+func isBlankLine(s string) bool {
+	return strings.Trim(s, " \t") == ""
 }
 
 // draftHeadingLevels maps the Draft.js block style of a header block's

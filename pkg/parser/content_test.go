@@ -458,6 +458,52 @@ func TestParseBlocks_FlushesOnMediaAndAtEnd(t *testing.T) {
 	}
 }
 
+// A line break typed inside a paragraph arrives as "\n" in a run; a lone
+// "\n" is a CommonMark soft break that renders as a space, merging lines
+// that are separate on Boosty. Run shape from a real post.json:
+// text("X \n\nX \n") + link + text("\n\n\n") + BLOCK_END. Blank-line
+// paragraph breaks stay as they are; "\r\n" is one line ending, not two.
+func TestParseBlocks_LineBreaksInsideParagraph(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "text", Content: `["A \n\nB \n","unstyled",[]]`},
+		{Type: "link", URL: "https://e.com/1", Content: `["one","unstyled",[]]`},
+		{Type: "text", Content: `["\n\n\n","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "text", Content: `["x\r\ny\n \nz","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+	}
+	result := ParseBlocks(blocks)
+	want := []string{
+		"A \n\nB   \n[one](<https://e.com/1>)",
+		"x  \ny  \n   \nz",
+	}
+	if !slices.Equal(result.TextParts, want) {
+		t.Errorf("TextParts = %q\nwant %q", result.TextParts, want)
+	}
+}
+
+// A link label's edge whitespace is the spacing to its neighbours; trimming
+// it with the label glued "see" to the link ("seethis postfor details").
+func TestParseBlocks_LinkLabelEdgeWhitespace(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "text", Content: `["see","unstyled",[]]`},
+		{Type: "link", URL: "https://e.com", Content: `[" this post ","unstyled",[]]`},
+		{Type: "text", Content: `["for details","unstyled",[]]`},
+		{Type: "text", Modificator: "BLOCK_END"},
+		{Type: "text", Content: `["see","unstyled",[]]`},
+		{Type: "link", URL: "", Content: `[" dead link ","unstyled",[]]`},
+		{Type: "text", Content: `["here","unstyled",[]]`},
+	}
+	result := ParseBlocks(blocks)
+	want := []string{
+		"see [this post](<https://e.com>) for details",
+		"see dead link here",
+	}
+	if !slices.Equal(result.TextParts, want) {
+		t.Errorf("TextParts = %q\nwant %q", result.TextParts, want)
+	}
+}
+
 // A link block with an empty URL (editor artifact, dead link) must keep the
 // author's label text in the archive instead of silently dropping the block.
 func TestParseBlocks_EmptyURLLinkKeepsLabel(t *testing.T) {
@@ -557,7 +603,8 @@ func TestParseBlocks_List(t *testing.T) {
 
 // Edge shapes: an unknown style falls back to bullets (as boosty-downloader
 // does), an item with only a nested list keeps an empty marker, a second
-// line inside an item stays under the item, and a non-inline block inside
+// line inside an item stays under the item after a hard break, and a
+// non-inline block inside
 // an item is reported instead of vanishing silently.
 func TestParseBlocks_ListItemEdges(t *testing.T) {
 	blocks := decodeBlocks(t, `[
@@ -570,7 +617,7 @@ func TestParseBlocks_ListItemEdges(t *testing.T) {
 		]}
 	]`)
 	got := ParseBlocks(blocks)
-	want := []string{"-\n  - child\n- a\n  b\n-"}
+	want := []string{"-\n  - child\n- a  \n  b\n-"}
 	if !slices.Equal(got.TextParts, want) {
 		t.Errorf("TextParts = %q\nwant %q", got.TextParts, want)
 	}
