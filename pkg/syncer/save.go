@@ -53,11 +53,24 @@ const commentsCapThreshold = 100
 // already fetched the per-post endpoint (cmd/download --url) pass that fresh
 // post through directly.
 //
+// SavePost holds the per-blog lock for its duration, like Sync and
+// DownloadAll: it writes into the same post directories and media .tmp files
+// they do. If another run is using the blog it fails fast.
+//
 // Contract: when err is nil, dirName is "" iff the post was inaccessible —
 // every accessible post returns a non-empty name on success. On error,
 // dirName may be empty (failures before the directory was created) or
 // non-empty (artefact failures after); callers must check err first.
 func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err error) {
+	// savePost writes nothing for an inaccessible post, not even the blog
+	// directory the lock file lives in.
+	if post.HasAccess {
+		unlock, err := e.lockBlog(e.blogDir())
+		if err != nil {
+			return "", false, err
+		}
+		defer unlock()
+	}
 	name := parser.FormatDirName(e.cfg.DirFormat, post.Title, post.PublishTime, post.ID)
 	dirName, out, err := e.savePost(post, name, e.cfg.WithMD, e.cfg.WithComments, 0)
 	return dirName, out.CommentsCapped, err

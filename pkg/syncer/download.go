@@ -19,15 +19,17 @@ type postJob struct {
 // re-processed (see Config.Force for what is still skipped).
 //
 // State is saved per-completed post under a mutex so a mid-run crash leaves
-// a consistent _state.json.
+// a consistent _state.json. The per-blog lock is held for the whole run; if
+// another run has it, DownloadAll fails fast.
 func (e *Engine) DownloadAll() error {
 	c := e.c
 	c.Log.Printf("Fetching all posts from %s...", e.cfg.Blog)
 
-	blogDir, st, err := e.loadState()
+	blogDir, st, unlock, err := e.loadState()
 	if err != nil {
 		return err
 	}
+	defer unlock()
 
 	var jobs []postJob
 	total := 0

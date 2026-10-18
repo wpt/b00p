@@ -332,11 +332,12 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 	//     on Windows; all current callers keep media under the same blog dir
 	//     as the destination, so this holds. A future caller that puts the
 	//     tmp staging area on a different mount must implement copy+remove.
-	//   - No two goroutines target the same `path` concurrently. The syncer
-	//     dirReserver gives each post a unique directory and DownloadMedia
-	//     emits unique filenames per media slot, so concurrent workers do
-	//     not race on the .tmp suffix. Direct callers outside the syncer
-	//     must enforce this themselves.
+	//   - No two writers target the same `path` concurrently. Within a run
+	//     the syncer dirReserver gives each post a unique directory and
+	//     DownloadMedia emits unique filenames per media slot, so concurrent
+	//     workers do not race on the .tmp suffix; across processes the
+	//     syncer's per-blog lock keeps a second run out. Direct callers
+	//     outside the syncer must enforce this themselves.
 	var f *os.File
 	if resp.StatusCode == http.StatusPartialContent && resumeFrom > 0 {
 		f, err = os.OpenFile(tmpPath, os.O_WRONLY|os.O_APPEND, 0644)

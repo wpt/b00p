@@ -299,12 +299,13 @@ func TestDirReserver_SuffixCollisionEscalatesToFullID(t *testing.T) {
 }
 
 // b00p's own blog-root filenames must never become a post dir, even before
-// the files exist: an "index.md"/"_state.json" dir breaks index/state forever.
+// the files exist: an "index.md"/"_state.json"/".b00p.lock" dir breaks the
+// index, state or run lock forever.
 func TestDirReserver_BlogServiceNamesGetSuffix(t *testing.T) {
 	dir := t.TempDir()
 	r := newDirReserver()
 
-	for _, base := range []string{"index.md", "_state.json"} {
+	for _, base := range []string{"index.md", "_state.json", ".b00p.lock"} {
 		if got := r.reserve(dir, "abcdef1234", base); got != base+"_abcdef12" {
 			t.Errorf("reserve(%q) = %q, want %q", base, got, base+"_abcdef12")
 		}

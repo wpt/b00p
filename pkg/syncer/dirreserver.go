@@ -188,12 +188,13 @@ func (r *dirReserver) diskOwnedBy(blogDir, name, postID string) bool {
 }
 
 // isBlogServiceName reports whether name collides with a blog-root file b00p
-// writes (index.md, _state.json), folded like reservationKey on case-insensitive FS.
+// writes (index.md, _state.json, .b00p.lock), folded like reservationKey on
+// case-insensitive FS.
 func isBlogServiceName(name string) bool {
 	if caseFoldFS {
 		name = strings.ToLower(name)
 	}
-	return name == blogIndexName || name == state.FileName
+	return name == blogIndexName || name == state.FileName || name == blogLockName
 }
 
 // reservationKey forms the map key for a (blogDir, name) pair. Centralised so

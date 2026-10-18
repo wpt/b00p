@@ -4,11 +4,13 @@
 // pkg/{boosty,downloader,parser,state} layers.
 //
 // All inputs are passed via Config — no package globals — so a caller can
-// run multiple Engines concurrently without cross-talk and tests can drive
-// behavior without a Cobra context.
+// run Engines for different blogs concurrently without cross-talk and tests
+// can drive behavior without a Cobra context. A second run on the same blog,
+// from this process or another, fails fast on the per-blog lock.
 package syncer
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -111,28 +113,67 @@ func (e *Engine) blogDir() string {
 	return filepath.Join(e.cfg.OutputDir, e.cfg.Blog)
 }
 
-// loadState creates the blog directory, loads _state.json, drops entries that
-// cannot be used (see State.DropEmptyDirNames) and seeds the dir reserver
-// with every tracked directory so a same-run NEW post whose formatted name
-// collides with a tracked post's folder is suffixed instead of claiming it —
-// the disk probe alone reports a tracked folder as free while its post.json
-// is missing.
-func (e *Engine) loadState() (string, *state.State, error) {
-	blogDir := e.blogDir()
+// blogLockName is the per-blog run lock file at the blog root. It is never
+// removed: unlinking a flock'd file would let a third run lock a fresh inode
+// while a second still holds the old one.
+const blogLockName = ".b00p.lock"
+
+// errLockHeld is what lockFile returns when another holder has the lock.
+var errLockHeld = errors.New("lock held")
+
+// lockBlog creates blogDir and takes the exclusive per-blog run lock,
+// failing fast if another run holds it. Two runs on one blog would resume
+// each other's live media .tmp and record a corrupted file as complete. The
+// OS drops the lock when the process exits, so a crash leaves no stale lock.
+// The returned func releases it.
+func (e *Engine) lockBlog(blogDir string) (func(), error) {
 	if err := os.MkdirAll(blogDir, 0755); err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	st, err := state.Load(blogDir)
+	path := filepath.Join(blogDir, blogLockName)
+	f, err := lockFile(path)
+	if errors.Is(err, errLockHeld) {
+		return nil, fmt.Errorf("another b00p run is using %s", blogDir)
+	}
 	if err != nil {
-		return "", nil, fmt.Errorf("load state: %w", err)
+		return nil, fmt.Errorf("lock blog: %w", err)
+	}
+	return func() {
+		if err := f.Close(); err != nil {
+			e.c.Log.Printf("  warning: failed to release %s: %v", path, err)
+		}
+	}, nil
+}
+
+// loadState takes the blog lock (see lockBlog), loads _state.json, drops
+// entries that cannot be used (see State.DropEmptyDirNames) and seeds the dir
+// reserver with every tracked directory so a same-run NEW post whose
+// formatted name collides with a tracked post's folder is suffixed instead of
+// claiming it — the disk probe alone reports a tracked folder as free while
+// its post.json is missing. The caller holds the lock until it calls unlock
+// at the end of its run.
+func (e *Engine) loadState() (blogDir string, st *state.State, unlock func(), err error) {
+	blogDir = e.blogDir()
+	release, err := e.lockBlog(blogDir)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	defer func() {
+		if err != nil {
+			release()
+		}
+	}()
+	st, err = state.Load(blogDir)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("load state: %w", err)
 	}
 	if dropped := st.DropEmptyDirNames(); len(dropped) > 0 {
 		e.c.Log.Printf("  warning: dropped %d state entr%s with no directory name (%v); the posts re-download",
 			len(dropped), map[bool]string{true: "y", false: "ies"}[len(dropped) == 1], dropped)
 		if err := st.Save(); err != nil {
-			return "", nil, fmt.Errorf("save state: %w", err)
+			return "", nil, nil, fmt.Errorf("save state: %w", err)
 		}
 	}
 	e.res.seed(blogDir, st.Posts)
-	return blogDir, st, nil
+	return blogDir, st, release, nil
 }
