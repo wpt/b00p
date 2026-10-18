@@ -14,15 +14,17 @@ import (
 // Sync compares the blog's API state with on-disk state, displays a diff,
 // optionally confirms with the user, then applies updates per-post. It is
 // the smart-default entrypoint: cheap pagination + state diff, with optional
-// expensive checks via Config.CheckMedia / Config.CheckFiles.
+// expensive checks via Config.CheckMedia / Config.CheckFiles. It holds the
+// per-blog lock for the whole run and fails fast if another run has it.
 func (e *Engine) Sync() error {
 	c := e.c
 	c.Log.Printf("Syncing %s...", e.cfg.Blog)
 
-	blogDir, st, err := e.loadState()
+	blogDir, st, unlock, err := e.loadState()
 	if err != nil {
 		return err
 	}
+	defer unlock()
 
 	// Phase 1: Fetch and classify.
 	//
