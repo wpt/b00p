@@ -267,6 +267,7 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 	idleTimer := time.AfterFunc(downloadIdleTimeout, func() { cancel(errIdleTimeout) })
 	defer idleTimer.Stop()
 
+	var crTotal int64 // a 206's Content-Range complete-length; 0 if unknown
 	switch resp.StatusCode {
 	case http.StatusOK:
 		// Server ignored our Range header (if any). resumeFrom is reset
@@ -278,18 +279,20 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 		// advertised total must match the one the partial was opened
 		// against, or the object was re-encoded between runs. Either way the
 		// partial is untrustworthy: drop it and let the retry restart at 0.
-		if resumeFrom > 0 {
-			cr := resp.Header.Get("Content-Range")
-			expectedPrefix := fmt.Sprintf("bytes %d-", resumeFrom)
-			total := contentRangeTotal(cr)
-			if !strings.HasPrefix(cr, expectedPrefix) || (expectedTotal > 0 && total > 0 && total != expectedTotal) {
-				c.Log.Printf("  warning: server returned 206 with Content-Range %q (wanted %s, total %d); restarting from 0", cr, expectedPrefix, expectedTotal)
-				resp.Body.Close()
-				if err := dropPartial(tmpPath, sidecarPath); err != nil {
-					return fmt.Errorf("download %s: Content-Range %q rejected; %w", filename, cr, err)
-				}
-				return fmt.Errorf("download %s: Content-Range %q rejected; tmp reset", filename, cr)
+		// Checked at resumeFrom 0 too: a short 206 is kept as a resumable
+		// prefix below, so it must be the object's head.
+		cr := resp.Header.Get("Content-Range")
+		expectedPrefix := fmt.Sprintf("bytes %d-", resumeFrom)
+		crTotal = contentRangeTotal(cr)
+		if !strings.HasPrefix(cr, expectedPrefix) || (expectedTotal > 0 && crTotal > 0 && crTotal != expectedTotal) {
+			c.Log.Printf("  warning: server returned 206 with Content-Range %q (wanted %s, total %d); restarting from 0", cr, expectedPrefix, expectedTotal)
+			resp.Body.Close()
+			if err := dropPartial(tmpPath, sidecarPath); err != nil {
+				return fmt.Errorf("download %s: Content-Range %q rejected; %w", filename, cr, err)
 			}
+			return fmt.Errorf("download %s: Content-Range %q rejected; tmp reset", filename, cr)
+		}
+		if resumeFrom > 0 {
 			c.Log.Printf("  resuming %s from %s", filename, FormatSize(resumeFrom))
 		}
 	case http.StatusRequestedRangeNotSatisfiable:
@@ -351,12 +354,18 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 		return fmt.Errorf("create file %s: %w", tmpPath, err)
 	}
 
-	// Total bytes once known: 200 returns full size in ContentLength; 206
-	// returns the remaining range, so we add resumeFrom to recover the full
-	// size for progress display. -1 stays -1 (server didn't advertise).
+	// Full object size once known, for progress, the sidecar and the
+	// completeness check: 200 returns it in ContentLength; a 206 names it in
+	// Content-Range, else its ContentLength covers only the range, so add
+	// resumeFrom. -1 stays -1 (server didn't advertise).
 	totalSize := resp.ContentLength
-	if resp.StatusCode == http.StatusPartialContent && totalSize > 0 {
-		totalSize += resumeFrom
+	if resp.StatusCode == http.StatusPartialContent {
+		switch {
+		case crTotal > 0:
+			totalSize = crTotal
+		case totalSize > 0:
+			totalSize += resumeFrom
+		}
 	}
 
 	// Pin the object the tmp is now associated with so the next attempt can
@@ -417,6 +426,19 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 			}
 		}
 		return fmt.Errorf("write %s: %w", path, errors.Join(copyErr, closeErr))
+	}
+	// A 206 may end before the object does (RFC 9110 allows it; some CDNs
+	// cap ranges) and net/http reports a clean EOF. The tmp is still a valid
+	// prefix, so keep it and its sidecar: the retry resumes from the new
+	// offset. More bytes than the total means it is no prefix at all.
+	if totalSize > 0 && pw.written != totalSize {
+		if pw.written > totalSize {
+			if err := dropPartial(tmpPath, sidecarPath); err != nil {
+				return fmt.Errorf("download %s: %d bytes for a %d-byte object; %w", filename, pw.written, totalSize, err)
+			}
+			return fmt.Errorf("download %s: %d bytes for a %d-byte object; tmp reset", filename, pw.written, totalSize)
+		}
+		return fmt.Errorf("download %s: incomplete, %d of %d bytes", filename, pw.written, totalSize)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		if cleanupErr := removePair(tmpPath, sidecarPath); cleanupErr != nil {

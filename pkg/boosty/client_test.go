@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -572,6 +574,126 @@ func TestDownloadOnce_TotalMismatchDropsPair(t *testing.T) {
 	for _, leftover := range []string{path + ".tmp", path + ".tmp.url"} {
 		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 			t.Errorf("expected %s to be dropped, stat err = %v", leftover, err)
+		}
+	}
+}
+
+// A 206 may end before the object does (some CDNs cap ranges). Its
+// Content-Length matches the short range, so net/http reports a clean EOF and
+// only the Content-Range total shows the file is incomplete; a chunked 206
+// has no Content-Length at all. The prefix must stay as tmp + sidecar, and
+// later attempts resume from the new offset until the object is complete.
+func TestDownload_Short206KeepsPrefixAndResumes(t *testing.T) {
+	const object = "0123456789abcdefghij"
+	for _, chunked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("chunked=%v", chunked), func(t *testing.T) {
+			var mu sync.Mutex
+			var ranges []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rng := r.Header.Get("Range")
+				mu.Lock()
+				ranges = append(ranges, rng)
+				mu.Unlock()
+				start, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(rng, "bytes="), "-"))
+				if err != nil {
+					t.Errorf("Range = %q, want bytes=N-", rng)
+					return
+				}
+				end := min(start+4, len(object))
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, len(object)))
+				if !chunked {
+					w.Header().Set("Content-Length", strconv.Itoa(end-start))
+				}
+				w.WriteHeader(http.StatusPartialContent)
+				if chunked {
+					w.(http.Flusher).Flush()
+				}
+				fmt.Fprint(w, object[start:end])
+			}))
+			defer server.Close()
+
+			c := &Client{
+				Tokens:       &Tokens{AccessToken: "test"},
+				HTTP:         server.Client(),
+				DownloadHTTP: server.Client(),
+				Log:          discardLogger{},
+			}
+			path := filepath.Join(t.TempDir(), "video.mp4")
+			if err := os.WriteFile(path+".tmp", []byte(object[:4]), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path+".tmp.url", resumeSidecar{Key: "video-42", Total: 20}.encode(), 0644); err != nil {
+				t.Fatal(err)
+			}
+			req := DownloadRequest{URL: server.URL + "/file", Path: path, Key: "video-42"}
+
+			err := c.downloadOnce(req)
+			if err == nil {
+				t.Fatal("downloadOnce accepted a 206 that ended at byte 8 of 20")
+			}
+			if errors.Is(err, errNonRetriable) {
+				t.Errorf("error %v must stay retriable so the next attempt resumes", err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("truncated file renamed into place, stat err = %v", err)
+			}
+			if data, _ := os.ReadFile(path + ".tmp"); string(data) != object[:8] {
+				t.Errorf("tmp = %q, want %q kept for resume", data, object[:8])
+			}
+			data, _ := os.ReadFile(path + ".tmp.url")
+			if sc := parseResumeSidecar(data); sc != (resumeSidecar{Key: "video-42", Total: 20}) {
+				t.Errorf("sidecar = %+v, want key video-42 and the Content-Range total 20", sc)
+			}
+
+			saved := RetryDelays
+			RetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			defer func() { RetryDelays = saved }()
+			if err := c.Download(req); err != nil {
+				t.Fatalf("Download: %v", err)
+			}
+			if data, _ := os.ReadFile(path); string(data) != object {
+				t.Errorf("file = %q, want %q", data, object)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if want := []string{"bytes=4-", "bytes=8-", "bytes=12-", "bytes=16-"}; !slices.Equal(ranges, want) {
+				t.Errorf("Range headers = %q, want %q (each attempt resumes from the last offset)", ranges, want)
+			}
+		})
+	}
+}
+
+// A 206 that delivers more bytes than the object's total leaves a tmp that
+// is no prefix of the object: drop the pair so the retry restarts from 0.
+func TestDownloadOnce_206PastTotalDropsPair(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 4-11/8")
+		w.WriteHeader(http.StatusPartialContent)
+		fmt.Fprint(w, "tailtail")
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.WriteFile(path+".tmp", []byte("head"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".tmp.url", resumeSidecar{Key: "video-42", Total: 8}.encode(), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := c.downloadOnce(DownloadRequest{URL: server.URL + "/file", Path: path, Key: "video-42"})
+	if err == nil || errors.Is(err, errNonRetriable) {
+		t.Fatalf("err = %v, want a retriable error for 12 bytes of an 8-byte object", err)
+	}
+	for _, leftover := range []string{path, path + ".tmp", path + ".tmp.url"} {
+		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be absent, stat err = %v", leftover, err)
 		}
 	}
 }
