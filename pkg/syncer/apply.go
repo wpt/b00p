@@ -48,7 +48,8 @@ type applyOutcome struct {
 	CommentsWritten bool
 	MDWritten       bool
 	// CommentsCapped reports that the comments fetch (when it happened)
-	// hit Boosty's structural ceiling. Only meaningful when CommentsWritten.
+	// can never match the API count (see downloadComments). Only meaningful
+	// when CommentsWritten.
 	CommentsCapped bool
 }
 

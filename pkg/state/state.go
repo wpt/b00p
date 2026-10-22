@@ -34,14 +34,15 @@ type PostEntry struct {
 	Locked        bool    `json:"locked,omitempty"`
 	HasComments   bool    `json:"hasComments"`
 	HasMd         bool    `json:"hasMd"`
-	// CommentsCapped records that this post hit the comments-fetch ceiling
-	// the last time it was saved: more than commentsPageLimit-1 top-level
-	// threads (pkg/syncer/save.go) or more than defaultReplyLimit replies in
-	// one thread (pkg/boosty/urls.go). Boosty's comments endpoint ignores
-	// offset, so the disk count can never reach the API count for such a
-	// post; classifyPost compares CommentsCount (the API count at last
-	// fetch) instead of the disk count for capped posts, so a refetch fires
-	// once per API-side change and then goes quiet.
+	// CommentsCapped records that the comments saved at the last fetch can
+	// never match the API count. Either the fetch hit the ceiling — more
+	// than commentsPageLimit-1 top-level threads (pkg/syncer/save.go; the
+	// endpoint ignores offset) or more than defaultReplyLimit replies in one
+	// thread (pkg/boosty/urls.go) — or the full fetch disagreed with
+	// count.comments, which Boosty sometimes gets wrong. classifyPost
+	// compares CommentsCount (the API count at last fetch) instead of the
+	// disk count for such a post, so a refetch fires once per API-side
+	// change and then goes quiet.
 	CommentsCapped bool `json:"commentsCapped,omitempty"`
 }
 
