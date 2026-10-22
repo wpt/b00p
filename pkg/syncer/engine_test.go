@@ -860,6 +860,10 @@ func TestEngine_ApplyItem_VideoMismatchFailedRedownloadKeepsOldFile(t *testing.T
 // permanently suppresses their comment refetch; the per-thread signal
 // (fewer live replies inlined than the live replyCount claims exist) is the
 // only way reply truncation is ever detected.
+//
+// The API count is the fetched live count plus apiDelta, so with apiDelta 0
+// only the structural signals can set the flag. A non-zero apiDelta is a
+// wrong count.comments: flagged, but never reported as a cap.
 func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
 	mk := func(n int) []boosty.Comment {
 		cs := make([]boosty.Comment, n)
@@ -871,20 +875,28 @@ func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
 	cases := []struct {
 		name     string
 		comments []boosty.Comment
+		apiDelta int
 		want     bool
 	}{
-		{"exactly_100_uncapped", mk(100), false},
-		{"101_capped", mk(101), true},
+		{"exactly_100_uncapped", mk(100), 0, false},
+		{"101_capped", mk(101), 0, true},
+		{"api_count_below_live", []boosty.Comment{
+			{ID: "c1", ReplyCount: 2, Replies: &boosty.CommentsResponse{
+				Data: []boosty.Comment{{ID: "r1"}, {ID: "r2"}},
+			}},
+		}, -2, true},
+		{"api_count_above_live", mk(3), 1, true},
+		{"negative_api_count", nil, -3, true},
 		{"reply_undercount_capped", []boosty.Comment{
 			{ID: "c1", ReplyCount: 5, Replies: &boosty.CommentsResponse{
 				Data: []boosty.Comment{{ID: "r1"}},
 			}},
-		}, true},
+		}, 0, true},
 		{"replies_fully_inlined_uncapped", []boosty.Comment{
 			{ID: "c1", ReplyCount: 1, Replies: &boosty.CommentsResponse{
 				Data: []boosty.Comment{{ID: "r1"}},
 			}},
-		}, false},
+		}, 0, false},
 		// ReplyCount counts live replies only, so the per-thread signal must
 		// compare live-to-live: 2 items inlined but one is a deleted stub →
 		// only 1 of 2 live replies actually stored → capped. Raw
@@ -893,7 +905,7 @@ func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
 			{ID: "c1", ReplyCount: 2, Replies: &boosty.CommentsResponse{
 				Data: []boosty.Comment{{ID: "r1"}, {ID: "r2", IsDeleted: true}},
 			}},
-		}, true},
+		}, 0, true},
 		// The reverse padding shape: all live replies present plus a stub on
 		// top (len(Data) > ReplyCount, the common deleted-comment case) is
 		// fully stored — not capped.
@@ -901,14 +913,14 @@ func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
 			{ID: "c1", ReplyCount: 1, Replies: &boosty.CommentsResponse{
 				Data: []boosty.Comment{{ID: "r1"}, {ID: "r2", IsDeleted: true}},
 			}},
-		}, false},
+		}, 0, false},
 		// A thread claiming replies but carrying no replies object at all:
 		// nothing was inlined, so its live replies are unreachable — capped
 		// (fail-closed), not an endless COMMENTS refetch loop that never
 		// recovers them.
 		{"nil_replies_with_replycount_capped", []boosty.Comment{
 			{ID: "c1", ReplyCount: 5},
-		}, true},
+		}, 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -918,12 +930,16 @@ func TestEngine_DownloadComments_CapBoundary(t *testing.T) {
 			e := New(f.client, Config{Blog: blog, OutputDir: t.TempDir()})
 
 			dir := t.TempDir()
-			capped, err := e.downloadComments("p1", dir, len(tc.comments))
+			live, _ := liveCommentCount(tc.comments)
+			capped, err := e.downloadComments("p1", dir, live+tc.apiDelta)
 			if err != nil {
 				t.Fatalf("downloadComments: %v", err)
 			}
 			if capped != tc.want {
 				t.Errorf("capped = %v, want %v", capped, tc.want)
+			}
+			if tc.apiDelta != 0 && strings.Contains(f.log.joined(), "comments capped") {
+				t.Errorf("a wrong API count was reported as a cap:\n%s", f.log.joined())
 			}
 			requireFile(t, filepath.Join(dir, "comments.json"))
 		})
@@ -1140,6 +1156,111 @@ func TestEngine_Sync_PromptApply_No(t *testing.T) {
 	// _state.json should not exist — Sync cancelled before any writes.
 	if _, err := os.Stat(filepath.Join(cfg.OutputDir, cfg.Blog, state.FileName)); err == nil {
 		t.Errorf("state file created despite N prompt")
+	}
+}
+
+// Boosty's count.comments is sometimes wrong — seen live: 1 for a thread with
+// two replies, -1 and -3 for posts with none — so the disk count can never
+// match it and a disk-vs-API trigger refetched such posts on every sync. One
+// refetch must settle the post until the API count moves; a failed refetch,
+// or a missing comments.json, must still fire. A short comments.json under a
+// correct count is the opposite case: it refetches and keeps the disk
+// comparison.
+func TestEngine_Sync_WrongCommentCountGoesQuiet(t *testing.T) {
+	thread := func(id string, replies ...string) boosty.Comment {
+		c := boosty.Comment{ID: id, ReplyCount: len(replies), Replies: &boosty.CommentsResponse{}}
+		for _, r := range replies {
+			c.Replies.Data = append(c.Replies.Data, boosty.Comment{ID: r})
+		}
+		return c
+	}
+	cases := []struct {
+		name       string
+		apiCount   int
+		onDisk     string           // comments.json from the previous run
+		live       []boosty.Comment // what the comments endpoint returns
+		wantCapped bool
+	}{
+		{"api_count_below_live", 1,
+			`[{"id":"c1","replyCount":2,"replies":{"data":[{"id":"r1"},{"id":"r2"}]}}]`,
+			[]boosty.Comment{thread("c1", "r1", "r2")}, true},
+		{"negative_api_count", -3, `[]`, nil, true},
+		{"short_disk_correct_count", 3,
+			`[{"id":"c1","replyCount":2,"replies":{"data":[]}}]`,
+			[]boosty.Comment{thread("c1", "r1", "r2")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blog := "myblog"
+			f := newFakeAPI(t)
+			outDir := t.TempDir()
+			blogDir := filepath.Join(outDir, blog)
+			postDir := filepath.Join(blogDir, "p1_dir")
+			mustMkdir(t, postDir)
+			writeFile(t, filepath.Join(postDir, "comments.json"), tc.onDisk)
+			writeInitialState(t, blogDir, map[string]state.PostEntry{
+				"p1": {Title: "p1", DirName: "p1_dir", UpdatedAt: 100, HasComments: true, CommentsCount: tc.apiCount},
+			})
+
+			var fetches atomic.Int32
+			serve := func(apiCount int, live []boosty.Comment, fail bool) {
+				f.PostsList(blog, boosty.Post{
+					ID: "p1", Title: "p1", HasAccess: true, UpdatedAt: 100,
+					Count: boosty.PostCount{Comments: apiCount},
+				})
+				body := boosty.CommentsResponse{Data: live, Extra: boosty.PaginationExtra{IsLast: true, IsFirst: true}}
+				f.HandleFunc("GET", "/v1/blog/"+blog+"/post/p1/comment/", func(w http.ResponseWriter, r *http.Request) {
+					fetches.Add(1)
+					if fail {
+						http.NotFound(w, r) // deterministic 4xx: fails fast, no retry schedule
+						return
+					}
+					_ = json.NewEncoder(w).Encode(body)
+				})
+			}
+			run := func(step string, wantFetches int32, wantErr bool) {
+				t.Helper()
+				fetchesBefore := fetches.Load()
+				quietBefore := strings.Count(f.log.joined(), "Everything up to date.")
+				err := New(f.client, Config{Blog: blog, OutputDir: outDir, AutoApply: true}).Sync()
+				if (err != nil) != wantErr {
+					t.Fatalf("%s: Sync error = %v, want error: %v\n%s", step, err, wantErr, f.log.joined())
+				}
+				if got := fetches.Load() - fetchesBefore; got != wantFetches {
+					t.Fatalf("%s: comments fetched %d time(s), want %d\n%s", step, got, wantFetches, f.log.joined())
+				}
+				quiet := strings.Count(f.log.joined(), "Everything up to date.") > quietBefore
+				if quiet != (wantFetches == 0) {
+					t.Fatalf("%s: up to date = %v, want %v\n%s", step, quiet, wantFetches == 0, f.log.joined())
+				}
+			}
+
+			serve(tc.apiCount, tc.live, false)
+			run("first sync", 1, false)
+			st, err := state.Load(blogDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := st.Posts["p1"]; got.CommentsCapped != tc.wantCapped || got.CommentsCount != tc.apiCount {
+				t.Fatalf("entry after first sync: CommentsCapped=%v CommentsCount=%d, want %v and %d",
+					got.CommentsCapped, got.CommentsCount, tc.wantCapped, tc.apiCount)
+			}
+			run("second sync", 0, false)
+
+			// A new comment moves the API count, wrong or not.
+			moved := append(tc.live, boosty.Comment{ID: "c9"})
+			serve(tc.apiCount+1, moved, true)
+			run("API count moved, fetch fails", 1, true)
+			serve(tc.apiCount+1, moved, false)
+			run("retry after the failed fetch", 1, false)
+			run("after the retry", 0, false)
+
+			if err := os.Remove(filepath.Join(postDir, "comments.json")); err != nil {
+				t.Fatal(err)
+			}
+			run("comments.json removed", 1, false)
+			run("after the restore", 0, false)
+		})
 	}
 }
 

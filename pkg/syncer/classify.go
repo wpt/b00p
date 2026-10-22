@@ -102,8 +102,8 @@ func (s syncItem) Detail() string {
 				s.Post.Count.Comments))
 		case s.Existing.CommentsCapped:
 			// Capped posts fire on the API count moving since the last
-			// fetch; the disk count is permanently below it.
-			parts = append(parts, fmt.Sprintf("comments: %d → %d (capped; %d on disk)",
+			// fetch; the disk count never matches it.
+			parts = append(parts, fmt.Sprintf("API comment count: %d → %d (%d on disk)",
 				s.Existing.CommentsCount, s.Post.Count.Comments, s.DiskCommentCount))
 		default:
 			parts = append(parts, fmt.Sprintf("comments: %d → %d",
@@ -183,18 +183,19 @@ func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 	// reading comments.json catches that gap on the next sync without any
 	// flag.
 	//
-	// A CommentsCapped post can never have disk catch up with the API (the
-	// endpoint serves one page), so for those the API count at last fetch
-	// (CommentsCount) is the baseline instead: the refetch fires once per
-	// API-side change — new threads, deletions — and goes quiet after a
-	// successful fetch rewrites CommentsCount.
+	// A CommentsCapped post can never have disk match the API (the endpoint
+	// serves one page, or Boosty's count is simply wrong), so for those the
+	// API count at last fetch (CommentsCount) is the baseline instead: the
+	// refetch fires once per API-side change — new threads, deletions — and
+	// goes quiet after a successful fetch rewrites CommentsCount.
 	if existing.HasComments {
 		n, ok := diskCommentCount(filepath.Join(blogDir, existing.DirName))
 		switch {
 		case !ok:
 			// Missing or unreadable comments.json is itself a reason to
-			// refetch when the post has any comments.
-			if post.Count.Comments > 0 {
+			// refetch unless the API says there is nothing to lose — which
+			// a negative or known-wrong count does not.
+			if post.Count.Comments != 0 || existing.CommentsCapped {
 				item.NewComments = true
 			}
 		case existing.CommentsCapped:

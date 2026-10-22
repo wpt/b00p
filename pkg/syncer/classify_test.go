@@ -232,6 +232,46 @@ func TestClassifyPost_FileMissingAPIZero_NoNewComments(t *testing.T) {
 	}
 }
 
+// Only a trustworthy zero says a missing comments.json lost nothing. A
+// negative count, or the count of a post whose fetch already disagreed with
+// it (CommentsCapped), says nothing about what the file held.
+func TestClassifyPost_FileMissingUntrustedCount_TriggersNewComments(t *testing.T) {
+	cases := []struct {
+		name   string
+		count  int
+		capped bool
+	}{
+		{"negative", -1, false},
+		{"capped_negative", -3, true},
+		{"capped_zero", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blogDir := t.TempDir()
+			mustMkdir(t, filepath.Join(blogDir, "post-dir"))
+
+			st, err := state.Load(blogDir)
+			if err != nil {
+				t.Fatalf("state.Load: %v", err)
+			}
+			st.Add("post1", state.PostEntry{
+				DirName:        "post-dir",
+				HasComments:    true,
+				CommentsCapped: tc.capped,
+				CommentsCount:  tc.count,
+				UpdatedAt:      100,
+			})
+
+			post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
+			post.Count.Comments = tc.count
+
+			if got := classifyPost(post, st, blogDir); !got.NewComments {
+				t.Error("NewComments = false, want true (comments.json missing, count untrusted)")
+			}
+		})
+	}
+}
+
 // CommentsCapped suppression is one-directional. disk < API on a capped post
 // stays quiet (catch-up is structurally impossible — the endpoint can never
 // return more than the cap), but disk > API still fires: the author deleted
@@ -323,8 +363,8 @@ func TestClassifyPost_CappedAPIMoved_Fires(t *testing.T) {
 	if !got.NewComments {
 		t.Error("NewComments = false, want true (capped post: API count 120 → 121 since last fetch)")
 	}
-	if d := got.Detail(); !strings.Contains(d, "120 → 121") || !strings.Contains(d, "capped") {
-		t.Errorf("Detail = %q, want the cached→API pair and the capped marker", d)
+	if d := got.Detail(); !strings.Contains(d, "API comment count: 120 → 121") {
+		t.Errorf("Detail = %q, want the cached→API count pair", d)
 	}
 }
 

@@ -31,9 +31,9 @@ const commentsCapThreshold = 100
 
 // SavePost downloads a post's full content into the engine's output directory
 // using the engine's Config for --md / --comments. Returns the directory name
-// actually used (which may include a collision suffix) and whether the
-// comments fetch hit Boosty's structural cap, so a caller can record both in
-// state.
+// actually used (which may include a collision suffix) and whether the saved
+// comments can never match post.Count.Comments (Boosty's structural cap, or
+// a count the API gets wrong), so a caller can record both in state.
 //
 // A non-nil error means at least one required artefact (post.json, media,
 // post.md when WithMD, comments.json when WithComments) could not be written
@@ -189,12 +189,13 @@ func (e *Engine) MaybeRefreshSignedURLs(post *boosty.Post) *boosty.Post {
 }
 
 // downloadComments fetches and saves comments.json. Returns capped=true when
-// the fetch hit Boosty's structural per-post limit (more than
-// commentsCapThreshold top-level items in the single page the endpoint
-// serves, or a thread that inlined fewer live replies than its ReplyCount)
-// so the caller can mark state accordingly. expectedCount is
-// post.Count.Comments at fetch time — used only for the warning, not for
-// disk accounting.
+// the saved live count can never match expectedCount (post.Count.Comments
+// at fetch time), so the caller can mark state accordingly: the fetch hit
+// Boosty's structural per-post limit (more than commentsCapThreshold
+// top-level items in the single page the endpoint serves, or a thread that
+// inlined fewer live replies than its ReplyCount), or the full fetch simply
+// disagrees with the API count — Boosty's count.comments is sometimes wrong
+// (seen: 1 for 3 live comments, and negative counts).
 func (e *Engine) downloadComments(postID, dir string, expectedCount int) (capped bool, err error) {
 	allComments, err := e.c.FetchComments(e.cfg.Blog, postID, commentsPageLimit)
 	if err != nil {
@@ -214,14 +215,14 @@ func (e *Engine) downloadComments(postID, dir string, expectedCount int) (capped
 	// than the server actually inlined — compared live-to-live, so deleted
 	// stubs padding Replies.Data cannot mask truncation of live replies).
 	diskCount, replyTruncated := liveCommentCount(allComments)
-	capped = replyTruncated || len(allComments) > commentsCapThreshold
+	truncated := replyTruncated || len(allComments) > commentsCapThreshold
 
-	if capped && expectedCount > diskCount {
+	if truncated && expectedCount > diskCount {
 		e.c.Log.Printf("  warning: comments capped for %s: %d of %d (API limit; remaining unreachable via current endpoint)",
 			postID, diskCount, expectedCount)
 	}
 	e.c.Log.Printf("  saved comments.json (%d comments)", diskCount)
-	return capped, nil
+	return truncated || diskCount != expectedCount, nil
 }
 
 // writeJSON writes raw, the API bytes v was decoded from, indented to path
