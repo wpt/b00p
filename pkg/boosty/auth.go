@@ -73,10 +73,10 @@ func LoadTokens(path string) (*Tokens, error) {
 	return &tokens, nil
 }
 
-// saveRetryWindow bounds how long SaveTokens retries a write that another
-// process's open handle blocks on Windows. A package variable so tests can
-// shrink it.
-var saveRetryWindow = 2 * time.Second
+// lockRetryWindow bounds how long retryLocked retries a rename that another
+// process's open handle blocks on Windows (auth.json saves, media tmp
+// renames). A package variable so tests can shrink it.
+var lockRetryWindow = 2 * time.Second
 
 // SaveTokens writes tokens to a JSON file atomically (temp + fsync + rename),
 // so an interrupted write cannot truncate an existing auth.json. Permissions
@@ -85,15 +85,21 @@ var saveRetryWindow = 2 * time.Second
 // On Windows an antivirus, indexer or backup handle on auth.json (or another
 // b00p reading it) makes the rename fail with "Access is denied" or a
 // sharing violation until that handle closes; SaveTokens retries those for up
-// to saveRetryWindow.
+// to lockRetryWindow.
 func (t *Tokens) SaveTokens(path string) error {
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal tokens: %w", err)
 	}
-	deadline := time.Now().Add(saveRetryWindow)
+	return retryLocked(func() error { return fileutil.WriteFileAtomic(path, data, 0600) })
+}
+
+// retryLocked runs op until it succeeds, fails with anything but a Windows
+// file lock (windowsFileLocked), or lockRetryWindow runs out.
+func retryLocked(op func() error) error {
+	deadline := time.Now().Add(lockRetryWindow)
 	for {
-		err := fileutil.WriteFileAtomic(path, data, 0600)
+		err := op()
 		if err == nil || !windowsFileLocked(err) || time.Now().After(deadline) {
 			return err
 		}

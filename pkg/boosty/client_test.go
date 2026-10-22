@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -698,6 +699,111 @@ func TestDownloadOnce_206PastTotalDropsPair(t *testing.T) {
 	}
 }
 
+// A rename that keeps failing after a complete download used to delete the
+// tmp and burn the retry schedule re-downloading the whole object into the
+// same failure. The finished tmp must survive with its sidecar, the error
+// must stop the schedule, and the next attempt must rename it without a GET.
+// A non-empty directory at the target fails the rename on every OS.
+func TestDownload_FailedRenameKeepsTmpForNextAttempt(t *testing.T) {
+	saved, savedWindow := RetryDelays, lockRetryWindow
+	RetryDelays, lockRetryWindow = []time.Duration{time.Millisecond, time.Millisecond}, 0
+	defer func() { RetryDelays, lockRetryWindow = saved, savedWindow }()
+
+	const object = "complete video bytes"
+	var gets atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets.Add(1)
+		fmt.Fprint(w, object)
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.MkdirAll(filepath.Join(path, "blocker"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	req := DownloadRequest{URL: server.URL + "/file", Path: path, Key: "video-42", Replace: true}
+
+	err := c.Download(req)
+	if !errors.Is(err, errNonRetriable) {
+		t.Fatalf("err = %v, want a non-retriable rename failure", err)
+	}
+	if n := gets.Load(); n != 1 {
+		t.Errorf("GETs = %d, want 1 (a blocked rename must not re-download)", n)
+	}
+	if data, _ := os.ReadFile(path + ".tmp"); string(data) != object {
+		t.Errorf("tmp = %q, want the complete download kept", data)
+	}
+	data, _ := os.ReadFile(path + ".tmp.url")
+	if sc := parseResumeSidecar(data); sc != (resumeSidecar{Key: "video-42", Total: int64(len(object))}) {
+		t.Errorf("sidecar = %+v, want key video-42 and total %d", sc, len(object))
+	}
+
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Download(req); err != nil {
+		t.Fatalf("Download after the blocker is gone: %v", err)
+	}
+	if n := gets.Load(); n != 1 {
+		t.Errorf("GETs = %d, want still 1 (the complete tmp is renamed, not re-downloaded)", n)
+	}
+	if data, _ := os.ReadFile(path); string(data) != object {
+		t.Errorf("file = %q, want %q", data, object)
+	}
+	for _, leftover := range []string{path + ".tmp", path + ".tmp.url"} {
+		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be absent, stat err = %v", leftover, err)
+		}
+	}
+}
+
+// On Windows a player or antivirus holding the target open blocks the rename
+// only until it lets go; the rename must wait that out within one attempt.
+// Go opens files without FILE_SHARE_DELETE, so os.Open stands in for it.
+func TestDownload_RenameRetriesWhileTargetLockedOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("an open handle blocks a rename only on Windows")
+	}
+	var gets atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gets.Add(1)
+		fmt.Fprint(w, "new video")
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens:       &Tokens{AccessToken: "test"},
+		HTTP:         server.Client(),
+		DownloadHTTP: server.Client(),
+		Log:          discardLogger{},
+	}
+	path := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.WriteFile(path, []byte("old video"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.AfterFunc(200*time.Millisecond, func() { f.Close() })
+
+	if err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: path, Key: "v", Replace: true}); err != nil {
+		t.Fatalf("Download while the target is open: %v", err)
+	}
+	if n := gets.Load(); n != 1 {
+		t.Errorf("GETs = %d, want 1", n)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "new video" {
+		t.Errorf("file = %q, want the replacement", data)
+	}
+}
+
 // Replace downloads over an existing non-empty file; the old bytes survive
 // until the new ones are renamed into place, so a failed re-download never
 // empties the slot.
@@ -1210,9 +1316,9 @@ func TestGetJSON_ConcurrentRefreshDedup(t *testing.T) {
 // in memory and lands in auth.json.new, the error names that file, and the
 // client never rotates again, so that file stays the valid credential.
 func TestGetJSON_RefreshSaveFailureKeepsRotatedTokens(t *testing.T) {
-	saved, savedWindow := RetryDelays, saveRetryWindow
-	RetryDelays, saveRetryWindow = []time.Duration{time.Millisecond}, 0
-	defer func() { RetryDelays, saveRetryWindow = saved, savedWindow }()
+	saved, savedWindow := RetryDelays, lockRetryWindow
+	RetryDelays, lockRetryWindow = []time.Duration{time.Millisecond}, 0
+	defer func() { RetryDelays, lockRetryWindow = saved, savedWindow }()
 
 	srv, hc := newAuthServer(t)
 	// A directory where auth.json should be: the rename onto it fails on

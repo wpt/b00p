@@ -62,8 +62,9 @@ const (
 )
 
 // errNonRetriable marks deterministic failures — a 4xx (other than 429)
-// download status, where re-requesting the same URL yields the same verdict.
-// Download fails fast on it instead of burning the backoff schedule.
+// download status, where re-requesting the same URL yields the same verdict,
+// or a rename that stayed blocked. Download fails fast on it instead of
+// burning the backoff schedule.
 var errNonRetriable = errors.New("non-retriable")
 
 // newDownloadTransport clones http.DefaultTransport so we inherit modern
@@ -104,9 +105,9 @@ func (c *Client) DownloadFile(url, path string) error {
 }
 
 // Download runs req with the retry schedule: first attempt + one retry per
-// RetryDelays entry on transport errors, 5xx and 429; deterministic 4xx fail
-// fast. Progress is reported through the client's ProgressLogger when it
-// implements one.
+// RetryDelays entry on transport errors, 5xx and 429; deterministic 4xx and a
+// blocked rename fail fast. Progress is reported through the client's
+// ProgressLogger when it implements one.
 func (c *Client) Download(req DownloadRequest) error {
 	if info, err := os.Stat(req.Path); err == nil && !req.Replace {
 		if info.Size() > 0 {
@@ -216,6 +217,13 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 	if info, err := os.Stat(tmpPath); err == nil && info.Mode().IsRegular() {
 		data, readErr := os.ReadFile(sidecarPath)
 		if sc := parseResumeSidecar(data); readErr == nil && sc.Key == req.Key {
+			// A complete tmp is left by a failed rename or a crash between
+			// close and rename. Resuming it would ask for bytes=<total>-,
+			// get 416 and throw the whole download away.
+			if sc.Total > 0 && info.Size() == sc.Total {
+				c.Log.Printf("  %s already downloaded; moving it into place", filename)
+				return c.commitTmp(tmpPath, sidecarPath, path, sc.Total)
+			}
 			resumeFrom = info.Size()
 			expectedTotal = sc.Total
 		} else {
@@ -440,11 +448,19 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 		}
 		return fmt.Errorf("download %s: incomplete, %d of %d bytes", filename, pw.written, totalSize)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		if cleanupErr := removePair(tmpPath, sidecarPath); cleanupErr != nil {
-			err = errors.Join(err, fmt.Errorf("cleanup tmp: %w", cleanupErr))
-		}
-		return fmt.Errorf("rename %s -> %s: %w", tmpPath, path, err)
+	return c.commitTmp(tmpPath, sidecarPath, path, pw.written)
+}
+
+// commitTmp renames a finished tmp over path. A Windows player, antivirus or
+// indexer holding either file open blocks the rename until it lets go, so it
+// is retried for lockRetryWindow. If it still fails, the tmp and its sidecar
+// stay (downloadOnce renames a complete one without a GET when the sidecar
+// knows the total), and the error is non-retriable: another attempt in this
+// run would hit the same lock.
+func (c *Client) commitTmp(tmpPath, sidecarPath, path string, size int64) error {
+	filename := filepath.Base(path)
+	if err := retryLocked(func() error { return os.Rename(tmpPath, path) }); err != nil {
+		return fmt.Errorf("download %s: %w; complete tmp kept for the next run (%w)", filename, err, errNonRetriable)
 	}
 	// Sidecar's only purpose is resume safety — once the final file is in
 	// place there is nothing to verify on the next run.
@@ -452,7 +468,7 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 		c.Log.Printf("  warning: failed to remove resume sidecar %s: %v", sidecarPath, err)
 	}
 
-	c.Log.Printf("  downloaded %s (%s)", filename, FormatSize(pw.written))
+	c.Log.Printf("  downloaded %s (%s)", filename, FormatSize(size))
 	return nil
 }
 

@@ -181,10 +181,10 @@ func TestSaveTokens_RetriesWhileFileLockedOnWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	saved := saveRetryWindow
-	saveRetryWindow = 0
+	saved := lockRetryWindow
+	lockRetryWindow = 0
 	err = (&Tokens{AccessToken: "a2"}).SaveTokens(path)
-	saveRetryWindow = saved
+	lockRetryWindow = saved
 	if err == nil {
 		f.Close()
 		t.Fatal("SaveTokens without retries succeeded under an open handle; the test no longer models the lock")
