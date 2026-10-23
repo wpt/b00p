@@ -79,6 +79,38 @@ func TestCheckMissingFiles_NoCommentsNoMd(t *testing.T) {
 	}
 }
 
+// Media filenames come from the list payload's blocks; an absent or 0-byte
+// file is missing (KeepExisting re-downloads both). External videos and
+// HLS-only videos are never downloaded, so they must never read as missing —
+// that would refire on every sync.
+func TestMissingMedia(t *testing.T) {
+	blocks := []boosty.ContentBlock{
+		{Type: "image", URL: "https://img.example/a.jpg"},
+		{Type: "video", URL: "https://youtu.be/x"},
+		{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{{Type: "hls", URL: "https://cdn.example/master.m3u8"}}},
+	}
+	cases := []struct {
+		name  string
+		image *string // nil = absent
+		want  bool
+	}{
+		{"present", new("IMG"), false},
+		{"absent", nil, true},
+		{"zero bytes", new(""), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.image != nil {
+				writeFile(t, filepath.Join(dir, "image_001.jpg"), *tc.image)
+			}
+			if got := missingMedia(blocks, dir); got != tc.want {
+				t.Errorf("missingMedia = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHasOkVideo(t *testing.T) {
 	cases := []struct {
 		name   string

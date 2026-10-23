@@ -17,19 +17,27 @@ import (
 // drive the FILES_MISSING apply branch so we re-download only what is
 // missing and preserve flags for files that still exist.
 type missingFiles struct {
+	// Dir: the whole post directory is gone. Set by classifyPost on every
+	// sync; the item goes through the first-download flow instead of the
+	// per-artefact branch, so the other flags stay unset.
+	Dir      bool
 	PostJSON bool
 	Comments bool
 	Markdown bool
+	Media    bool // a media file is absent or empty; set by classifyPost on every sync
 }
 
 func (m missingFiles) Any() bool {
-	return m.PostJSON || m.Comments || m.Markdown
+	return m.Dir || m.PostJSON || m.Comments || m.Markdown || m.Media
 }
 
 // String returns a comma-separated list of missing filenames; empty if all
 // present. Used both for sync display and as a stable test fixture.
 func (m missingFiles) String() string {
 	var parts []string
+	if m.Dir {
+		parts = append(parts, "post directory")
+	}
 	if m.PostJSON {
 		parts = append(parts, "post.json")
 	}
@@ -39,12 +47,16 @@ func (m missingFiles) String() string {
 	if m.Markdown {
 		parts = append(parts, "post.md")
 	}
+	if m.Media {
+		parts = append(parts, "media")
+	}
 	return strings.Join(parts, ", ")
 }
 
 // detectMissingFiles returns a struct describing which expected files are
-// absent for a post. Comments and post.md are only checked when the prior
-// state recorded them as previously downloaded.
+// absent for a post (--check-files). Comments and post.md are only checked
+// when the prior state recorded them as previously downloaded. Media is not
+// checked here: classifyPost does that on every sync (missingMedia).
 func detectMissingFiles(entry state.PostEntry, dir string) missingFiles {
 	var m missingFiles
 	if _, err := os.Stat(filepath.Join(dir, "post.json")); err != nil {
@@ -63,6 +75,25 @@ func detectMissingFiles(entry state.PostEntry, dir string) missingFiles {
 	return m
 }
 
+// missingMedia reports whether any media file the post's blocks name is
+// absent from dir or empty — the same rule downloader.KeepExisting
+// re-downloads by. Local stats only: the contents are never read, so a
+// truncated non-empty file passes. External videos are skipped: they are
+// links unless --download-external, and yt-dlp picks their extension.
+//
+// Filenames are positional (image_001.jpg …), so a change to how ParseBlocks
+// names files makes every existing archive read as missing here and sync
+// re-downloads it under the new names.
+func missingMedia(blocks []boosty.ContentBlock, dir string) bool {
+	return slices.ContainsFunc(parser.ParseBlocks(blocks).Media, func(item parser.MediaItem) bool {
+		if item.Type == "external_video" {
+			return false
+		}
+		info, err := os.Stat(filepath.Join(dir, item.Filename))
+		return err != nil || info.Size() == 0
+	})
+}
+
 // runCheckMedia performs HEAD-based video size validation in parallel and
 // records mismatches on the corresponding items. Items that already have
 // IsNew/JustUnlocked/etc. set are skipped — they will get fresh media
@@ -75,7 +106,7 @@ func (e *Engine) runCheckMedia(blogDir string, items []syncItem) {
 			continue
 		}
 		// Skip items that will be fully re-downloaded anyway.
-		if item.JustLocked || item.JustUnlocked {
+		if item.JustLocked || item.JustUnlocked || item.Missing.Dir {
 			continue
 		}
 		jobs = append(jobs, i)

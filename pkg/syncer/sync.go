@@ -57,19 +57,22 @@ func (e *Engine) Sync() error {
 		c.Log.Printf("Checking files on disk...")
 		for i := range items {
 			// Skip cases that already trigger a full re-download in apply
-			// (JustUnlocked), aren't in state at all, or have no access.
-			// !HasAccess covers newly locked, locked-new AND still-locked
-			// posts: none of them can be repaired — the per-post endpoint
-			// returns a stub that fetchFullPost rejects — so flagging
-			// Missing.* on them would queue a guaranteed-failing apply on
-			// every run (and a permanent non-zero exit for cron). Mirrors
-			// runCheckMedia's guard in checks.go.
+			// (JustUnlocked, Missing.Dir), aren't in state at all, or have
+			// no access. !HasAccess covers newly locked, locked-new AND
+			// still-locked posts: none of them can be repaired — the
+			// per-post endpoint returns a stub that fetchFullPost rejects —
+			// so flagging Missing.* on them would queue a guaranteed-failing
+			// apply on every run (and a permanent non-zero exit for cron).
+			// Mirrors runCheckMedia's guard in checks.go.
 			if !items[i].InState || !items[i].Post.HasAccess ||
-				items[i].JustUnlocked {
+				items[i].JustUnlocked || items[i].Missing.Dir {
 				continue
 			}
+			// Media was already checked by classifyPost.
+			media := items[i].Missing.Media
 			items[i].Missing = detectMissingFiles(items[i].Existing,
 				filepath.Join(blogDir, items[i].DirName))
+			items[i].Missing.Media = media
 		}
 	}
 

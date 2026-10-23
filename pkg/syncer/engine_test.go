@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1261,6 +1262,124 @@ func TestEngine_Sync_WrongCommentCountGoesQuiet(t *testing.T) {
 			run("comments.json removed", 1, false)
 			run("after the restore", 0, false)
 		})
+	}
+}
+
+// Damaged media used to be invisible to every sync mode: a deleted post
+// folder came back as post.json and post.md only (or comments.json alone),
+// and the next sync reported everything up to date. Each kind of damage must
+// be restored by one sync, with or without --check-files, fetching only the
+// missing media, and the next sync must go quiet.
+func TestEngine_Sync_RestoresMissingFiles(t *testing.T) {
+	cases := []struct {
+		name      string
+		damage    func(t *testing.T, postDir string)
+		refetched []string // media fetched again by the repair
+	}{
+		{"post dir deleted", func(t *testing.T, postDir string) {
+			if err := os.RemoveAll(postDir); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"a.jpg", "b.jpg", "v.mp4"}},
+		{"image deleted", func(t *testing.T, postDir string) {
+			if err := os.Remove(filepath.Join(postDir, "image_001.jpg")); err != nil {
+				t.Fatal(err)
+			}
+		}, []string{"a.jpg"}},
+		{"image emptied", func(t *testing.T, postDir string) {
+			writeFile(t, filepath.Join(postDir, "image_001.jpg"), "")
+		}, []string{"a.jpg"}},
+	}
+	for _, tc := range cases {
+		for _, checkFiles := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/check-files=%v", tc.name, checkFiles), func(t *testing.T) {
+				blog := "myblog"
+				f := newFakeAPI(t)
+				media := map[string]string{"a.jpg": "IMAGE-A", "b.jpg": "IMAGE-B", "v.mp4": "VIDEO"}
+				gets := map[string]*atomic.Int32{}
+				for name, body := range media {
+					n := new(atomic.Int32)
+					gets[name] = n
+					f.HandleFunc("GET", "/_media/"+name, func(w http.ResponseWriter, r *http.Request) {
+						n.Add(1)
+						fmt.Fprint(w, body)
+					})
+				}
+				post := boosty.Post{
+					ID: "p1", Title: "Hello", HasAccess: true, PublishTime: 1700000000, UpdatedAt: 100,
+					Count: boosty.PostCount{Comments: 1},
+					Data: []boosty.ContentBlock{
+						{Type: "text", Content: `["body","unstyled",[]]`},
+						{Type: "image", URL: f.MediaURL("a.jpg")},
+						{Type: "image", URL: f.MediaURL("b.jpg")},
+						{Type: "ok_video", PlayerURLs: []boosty.PlayerURL{{Type: "high", URL: f.MediaURL("v.mp4")}}},
+					},
+				}
+				f.PostsList(blog, post)
+				var postFetches atomic.Int32
+				f.HandleFunc("GET", "/v1/blog/"+blog+"/post/p1", func(w http.ResponseWriter, r *http.Request) {
+					postFetches.Add(1)
+					_ = json.NewEncoder(w).Encode(post)
+				})
+				f.CommentsList(blog, "p1", boosty.Comment{ID: "c1"})
+
+				outDir := t.TempDir()
+				blogDir := filepath.Join(outDir, blog)
+				if err := New(f.client, Config{Blog: blog, OutputDir: outDir, WithMD: true, WithComments: true}).DownloadAll(); err != nil {
+					t.Fatalf("DownloadAll: %v\n%s", err, f.log.joined())
+				}
+				st, err := state.Load(blogDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				postDir := filepath.Join(blogDir, st.Posts["p1"].DirName)
+				files := map[string]string{"image_001.jpg": "IMAGE-A", "image_002.jpg": "IMAGE-B", "video_001.mp4": "VIDEO"}
+
+				// The disk checks must stay local: a quiet sync fetches no post.
+				runSync := func(step string, checkFiles, wantQuiet bool) {
+					t.Helper()
+					quietBefore := strings.Count(f.log.joined(), "Everything up to date.")
+					fetchesBefore := postFetches.Load()
+					cfg := Config{Blog: blog, OutputDir: outDir, AutoApply: true, CheckFiles: checkFiles}
+					if err := New(f.client, cfg).Sync(); err != nil {
+						t.Fatalf("%s: Sync: %v\n%s", step, err, f.log.joined())
+					}
+					if quiet := strings.Count(f.log.joined(), "Everything up to date.") > quietBefore; quiet != wantQuiet {
+						t.Fatalf("%s: up to date = %v, want %v\n%s", step, quiet, wantQuiet, f.log.joined())
+					}
+					if n := postFetches.Load() - fetchesBefore; wantQuiet && n != 0 {
+						t.Fatalf("%s: quiet sync fetched the post %d time(s)", step, n)
+					}
+				}
+				runSync("before the damage", checkFiles, true)
+
+				tc.damage(t, postDir)
+				getsBefore := map[string]int32{}
+				for name, n := range gets {
+					getsBefore[name] = n.Load()
+				}
+				runSync("repair", checkFiles, false)
+
+				for name, want := range files {
+					if data, err := os.ReadFile(filepath.Join(postDir, name)); string(data) != want {
+						t.Errorf("%s = %q (%v), want %q\n%s", name, data, err, want, f.log.joined())
+					}
+				}
+				for _, name := range []string{"post.json", "post.md", "comments.json"} {
+					requireFile(t, filepath.Join(postDir, name))
+				}
+				for name, n := range gets {
+					want := getsBefore[name]
+					if slices.Contains(tc.refetched, name) {
+						want++
+					}
+					if got := n.Load(); got != want {
+						t.Errorf("%s fetched %d time(s), want %d (only missing media is downloaded)", name, got, want)
+					}
+				}
+				runSync("after the repair", checkFiles, true)
+			})
+		}
 	}
 }
 
