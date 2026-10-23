@@ -65,8 +65,12 @@ func (o applyOutcome) allOK() bool {
 //
 // Triggers, by artefact:
 //   - Post: post was Edited, or post.json went missing on disk.
-//   - Media: post was Edited (block list may have changed), or check-media
-//     reported a size mismatch needing fresh signed URLs.
+//   - Media: post was Edited (block list may have changed), check-media
+//     reported a size mismatch needing fresh signed URLs, a media file is
+//     absent or empty (every sync), or check-files found post.json missing.
+//     The last two run under KeepExisting (see applyExisting): files already
+//     on disk cost a stat, and the per-post payload, not the list one,
+//     decides what is fetched.
 //   - MD: this run carries WithMD (or the prior entry recorded HasMd) AND
 //     either Edited or post.md is missing from disk.
 //   - Comments: count changed (NewComments — only ever set for posts whose
@@ -75,8 +79,9 @@ func (o applyOutcome) allOK() bool {
 //     carries WithComments.
 func decideApplyActions(item syncItem, cfg Config) applyActions {
 	return applyActions{
-		Post:  item.Edited || item.Missing.PostJSON,
-		Media: item.Edited || item.VideoMismatch != "",
+		Post: item.Edited || item.Missing.PostJSON,
+		Media: item.Edited || item.VideoMismatch != "" ||
+			item.Missing.Media || item.Missing.PostJSON,
 		MD: (cfg.WithMD || item.Existing.HasMd) &&
 			(item.Edited || item.Missing.Markdown),
 		Comments: item.NewComments ||
@@ -89,14 +94,14 @@ func decideApplyActions(item syncItem, cfg Config) applyActions {
 // handled independently so combined changes (e.g. edited + comments +
 // missing post.md) are all applied in a single pass.
 //
-// IsNew and JustUnlocked posts go through the first-download flow (the
-// latter's on-disk artefacts predate the lock, and saveNewPost merges the
-// prior entry). JustLocked only flips Locked=true. The actionable-update
-// branch (Edited / NewComments / VideoMismatch / Missing.*) requires
-// InState=true, which its three producers guarantee: classifyPost,
-// runCheckMedia, and Sync's --check-files block. BackfillUpdatedAt-only items
-// fall to the default no-op — applyBackfill already handled them before the
-// per-item loop.
+// IsNew, JustUnlocked and Missing.Dir posts go through the first-download
+// flow (saveNewPost merges the prior entry, so tracked post.md and
+// comments.json come back too). JustLocked only flips Locked=true. The
+// actionable-update branch (Edited / NewComments / VideoMismatch /
+// Missing.*) requires InState=true, which its three producers guarantee:
+// classifyPost, runCheckMedia, and Sync's --check-files block.
+// BackfillUpdatedAt-only items fall to the default no-op — applyBackfill
+// already handled them before the per-item loop.
 func (e *Engine) applyItem(st *state.State, item syncItem) {
 	switch {
 	case item.IsNew:
@@ -107,6 +112,9 @@ func (e *Engine) applyItem(st *state.State, item syncItem) {
 		e.saveNewPost(st, &item.Post)
 	case item.JustLocked:
 		e.applyJustLocked(st, item)
+	case item.Missing.Dir:
+		e.c.Log.Printf("  re-downloading (directory missing): %s", item.Post.Title)
+		e.saveNewPost(st, &item.Post)
 	case item.IsActionable():
 		e.c.Log.Printf("  updating: %s — %s", item.Post.Title, item.Detail())
 		e.applyExisting(st, item)
@@ -176,8 +184,9 @@ func (e *Engine) pickDirName(old state.PostEntry, post *boosty.Post) string {
 
 // applyExisting re-produces the artefacts an actionable update needs
 // (decideApplyActions). An Edited item replaces every media file and lets
-// buildSyncEntry advance UpdatedAt when every channel lands; a
-// VideoMismatch-only item replaces videos only.
+// buildSyncEntry advance UpdatedAt when every channel lands; a VideoMismatch
+// item replaces videos only; any other media trigger (Missing.*) fetches
+// only absent or empty files.
 //
 // Requires InState=true: the entry is read from st.Posts and patched in
 // place so failed writes never advance UpdatedAt / CommentsCount past disk
@@ -217,9 +226,12 @@ func (e *Engine) applyExisting(st *state.State, item syncItem) {
 		return
 	}
 
-	mode := downloader.ReplaceVideos
-	if item.Edited {
+	mode := downloader.KeepExisting
+	switch {
+	case item.Edited:
 		mode = downloader.ReplaceAll
+	case item.VideoMismatch != "":
+		mode = downloader.ReplaceVideos
 	}
 	out, err := e.runApplyActions(dir, &fullPost, mode, actions)
 	if err != nil {

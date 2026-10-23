@@ -2,7 +2,9 @@ package syncer
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +163,17 @@ func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 		return item
 	}
 
+	// A post directory removed by hand, a disk cleanup or an antivirus: the
+	// checks below would bring back only its media and comments.json, never
+	// post.json or post.md. The first-download flow restores every tracked
+	// artefact. Other stat errors say nothing about the folder and fall
+	// through.
+	dir := filepath.Join(blogDir, existing.DirName)
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		item.Missing.Dir = true
+		return item
+	}
+
 	// State entries written before UpdatedAt was added to the schema have
 	// UpdatedAt == 0; treating that as an edit would flag every such post
 	// as UPDATED on first sync after upgrade. Require a known previous
@@ -170,6 +183,13 @@ func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 	}
 	if existing.UpdatedAt == 0 && post.UpdatedAt != 0 {
 		item.BackfillUpdatedAt = true
+	}
+
+	// Deleted or empty media comes back without a flag, through KeepExisting
+	// (applyExisting). An edited post replaces all of its media anyway, and
+	// files its edit added would read as missing here.
+	if !item.Edited {
+		item.Missing.Media = missingMedia(post.Data, dir)
 	}
 
 	// Comment-count trigger, only for posts whose comments are tracked
@@ -189,7 +209,7 @@ func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 	// refetch fires once per API-side change — new threads, deletions — and
 	// goes quiet after a successful fetch rewrites CommentsCount.
 	if existing.HasComments {
-		n, ok := diskCommentCount(filepath.Join(blogDir, existing.DirName))
+		n, ok := diskCommentCount(dir)
 		switch {
 		case !ok:
 			// Missing or unreadable comments.json is itself a reason to

@@ -292,14 +292,26 @@ func TestDecideApplyActions_VideoMismatchOnly_TriggersMediaOnly(t *testing.T) {
 	}
 }
 
+// A post.json repair also runs the media channel: it fetches the per-post
+// payload anyway, and under KeepExisting files on disk cost only a stat.
 func TestDecideApplyActions_MissingPostJSON(t *testing.T) {
 	got := decideApplyActions(syncItem{Missing: missingFiles{PostJSON: true}}, Config{})
-	if !got.Post {
-		t.Error("Missing.PostJSON → Post = false, want true")
+	if !got.Post || !got.Media {
+		t.Errorf("Missing.PostJSON → Post=%v Media=%v, want both true", got.Post, got.Media)
 	}
-	if got.Media || got.MD || got.Comments {
-		t.Errorf("Missing.PostJSON only → Media=%v MD=%v Comments=%v, want all false",
-			got.Media, got.MD, got.Comments)
+	if got.MD || got.Comments {
+		t.Errorf("Missing.PostJSON only → MD=%v Comments=%v, want both false", got.MD, got.Comments)
+	}
+}
+
+func TestDecideApplyActions_MissingMediaTriggersMediaOnly(t *testing.T) {
+	got := decideApplyActions(syncItem{Missing: missingFiles{Media: true}}, Config{WithMD: true, WithComments: true})
+	if !got.Media {
+		t.Error("Missing.Media → Media = false, want true")
+	}
+	if got.Post || got.MD || got.Comments {
+		t.Errorf("Missing.Media only → Post=%v MD=%v Comments=%v, want all false",
+			got.Post, got.MD, got.Comments)
 	}
 }
 

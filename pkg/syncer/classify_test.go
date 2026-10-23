@@ -521,6 +521,7 @@ func TestClassifyPost_InState_UpdatedAtChanged_Edited(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state.Load: %v", err)
 	}
+	mustMkdir(t, filepath.Join(blogDir, "d"))
 	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 100})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 200}
@@ -539,6 +540,7 @@ func TestClassifyPost_InState_UpdatedAtUnchanged_NotEdited(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state.Load: %v", err)
 	}
+	mustMkdir(t, filepath.Join(blogDir, "d"))
 	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 100})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}
@@ -556,6 +558,7 @@ func TestClassifyPost_InState_LegacyZeroUpdatedAt_Backfill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("state.Load: %v", err)
 	}
+	mustMkdir(t, filepath.Join(blogDir, "d"))
 	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 0})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 12345}
@@ -568,6 +571,52 @@ func TestClassifyPost_InState_LegacyZeroUpdatedAt_Backfill(t *testing.T) {
 	}
 	if got.IsActionable() {
 		t.Error("IsActionable = true, want false (pure backfill is persisted but not actionable)")
+	}
+}
+
+// A tracked post whose directory is gone goes through the first-download
+// flow on a plain sync. It must not also fire COMMENTS, whose apply would
+// recreate a folder holding only comments.json.
+func TestClassifyPost_InState_DirMissing(t *testing.T) {
+	blogDir := t.TempDir()
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	st.Add("post1", state.PostEntry{DirName: "gone", UpdatedAt: 100, HasComments: true, CommentsCount: 3})
+
+	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 200, Count: boosty.PostCount{Comments: 3}}
+	got := classifyPost(post, st, blogDir)
+	if !got.Missing.Dir {
+		t.Error("Missing.Dir = false, want true")
+	}
+	if got.NewComments || got.Edited {
+		t.Errorf("NewComments=%v Edited=%v, want both false (the first-download flow covers them)", got.NewComments, got.Edited)
+	}
+	if got.DirName != "gone" {
+		t.Errorf("DirName = %q, want the tracked name", got.DirName)
+	}
+}
+
+// An edit replaces all media anyway; files it added are not on disk yet and
+// must not be reported as missing.
+func TestClassifyPost_EditedSkipsMediaCheck(t *testing.T) {
+	blogDir := t.TempDir()
+	mustMkdir(t, filepath.Join(blogDir, "d"))
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatalf("state.Load: %v", err)
+	}
+	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 100})
+
+	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100,
+		Data: []boosty.ContentBlock{{Type: "image", URL: "https://img.example/a.jpg"}}}
+	if got := classifyPost(post, st, blogDir); !got.Missing.Media {
+		t.Error("Missing.Media = false for an unedited post with no image_001.jpg, want true")
+	}
+	post.UpdatedAt = 200
+	if got := classifyPost(post, st, blogDir); !got.Edited || got.Missing.Media {
+		t.Errorf("Edited=%v Missing.Media=%v, want true and false", got.Edited, got.Missing.Media)
 	}
 }
 
