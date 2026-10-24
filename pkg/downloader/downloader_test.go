@@ -86,8 +86,8 @@ func TestDownloadMedia_SkipsExternalVideos(t *testing.T) {
 	c := newTestClient(server, log)
 
 	media := []parser.MediaItem{
-		{Type: "external_video", URL: "https://youtu.be/abc", Filename: "ext"},
-		{Type: "external_video", URL: "https://vk.com/video123", Filename: "ext2"},
+		{Type: "external_video", URL: "https://youtu.be/abc"},
+		{Type: "external_video", URL: "https://vk.com/video123"},
 	}
 	dir := t.TempDir()
 	err := DownloadMedia(c, media, dir, KeepExisting)
@@ -315,7 +315,7 @@ func TestDownloadExternal_MissingYTDLP(t *testing.T) {
 
 	log := &recordingLogger{}
 	media := []parser.MediaItem{
-		{Type: "external_video", URL: "https://youtu.be/abc", Filename: "ext"},
+		{Type: "external_video", URL: "https://youtu.be/abc"},
 	}
 	err := DownloadExternal(log, media, t.TempDir())
 	if err == nil {
@@ -335,7 +335,7 @@ func TestDownloadExternal_CreatesDir(t *testing.T) {
 	log := &recordingLogger{}
 	dir := filepath.Join(t.TempDir(), "missing", "nested")
 	err := DownloadExternal(log, []parser.MediaItem{
-		{Type: "external_video", URL: "https://youtu.be/abc", Filename: "ext"},
+		{Type: "external_video", URL: "https://youtu.be/abc"},
 	}, dir)
 	if err == nil {
 		t.Fatal("fake yt-dlp should still fail after directory creation")
@@ -353,13 +353,13 @@ func TestDownloadExternal_SeparatorBeforeURL(t *testing.T) {
 
 	const videoURL = "https://youtu.be/abc"
 	err := DownloadExternal(&recordingLogger{}, []parser.MediaItem{
-		{Type: "external_video", URL: videoURL, Filename: "ext"},
+		{Type: "external_video", URL: videoURL},
 	}, t.TempDir())
 	if err == nil {
 		t.Fatal("expected non-nil error from failing fake yt-dlp")
 	}
 
-	want := [][]string{{"--no-playlist", "-o", "ext.%(ext)s", "--", videoURL}}
+	want := [][]string{{"--no-playlist", "-o", "external_%(extractor_key)s_%(id)s.%(ext)s", "--", videoURL}}
 	if got := calls(); !reflect.DeepEqual(got, want) {
 		t.Errorf("yt-dlp calls = %q, want %q", got, want)
 	}
@@ -372,11 +372,11 @@ func TestDownloadExternal_SkipsNonHTTPURL(t *testing.T) {
 
 	bad := []string{"--exec=rm -rf /", "file:///etc/passwd", "ftp://example.com/v.mp4"}
 	var media []parser.MediaItem
-	for i, u := range bad {
-		media = append(media, parser.MediaItem{Type: "external_video", URL: u, Filename: fmt.Sprintf("bad%d", i)})
+	for _, u := range bad {
+		media = append(media, parser.MediaItem{Type: "external_video", URL: u})
 	}
 	const goodURL = "https://youtu.be/ok"
-	media = append(media, parser.MediaItem{Type: "external_video", URL: goodURL, Filename: "ok"})
+	media = append(media, parser.MediaItem{Type: "external_video", URL: goodURL})
 
 	err := DownloadExternal(&recordingLogger{}, media, t.TempDir())
 	if err == nil {
@@ -387,7 +387,7 @@ func TestDownloadExternal_SkipsNonHTTPURL(t *testing.T) {
 			t.Errorf("error %q does not report skipped URL %q", err, u)
 		}
 	}
-	want := [][]string{{"--no-playlist", "-o", "ok.%(ext)s", "--", goodURL}}
+	want := [][]string{{"--no-playlist", "-o", "external_%(extractor_key)s_%(id)s.%(ext)s", "--", goodURL}}
 	if got := calls(); !reflect.DeepEqual(got, want) {
 		t.Errorf("yt-dlp calls = %q, want only the https item %q", got, want)
 	}
@@ -400,8 +400,8 @@ func TestDownloadExternal_AggregatesFailures(t *testing.T) {
 
 	log := &recordingLogger{}
 	media := []parser.MediaItem{
-		{Type: "external_video", URL: "https://youtu.be/aaa", Filename: "ext1"},
-		{Type: "external_video", URL: "https://vk.com/video=bbb", Filename: "ext2"},
+		{Type: "external_video", URL: "https://youtu.be/aaa"},
+		{Type: "external_video", URL: "https://vk.com/video=bbb"},
 	}
 	err := DownloadExternal(log, media, t.TempDir())
 	if err == nil {

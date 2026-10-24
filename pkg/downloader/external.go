@@ -28,6 +28,12 @@ import (
 // that, switch to a shared deadline across the loop.
 const ytdlpTimeout = 20 * time.Minute
 
+// externalTemplate is yt-dlp's output name for an embed: its remote identity,
+// not its slot in the post. yt-dlp skips a file that already exists, so a
+// slot name kept the old video after an edit swapped the embed, and fetched
+// the same video again under a new number after an edit shifted the slots.
+const externalTemplate = "external_%(extractor_key)s_%(id)s.%(ext)s"
+
 // DownloadExternal downloads external videos (YouTube, VK, etc.) using yt-dlp.
 // Failures for individual videos are logged but do not abort the loop; the
 // combined error (or nil) is returned so the caller can surface them.
@@ -72,7 +78,7 @@ func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) e
 		// flag (e.g. `--exec=...`), which would otherwise let a hostile post
 		// smuggle arbitrary args through the embed.
 		ctx, cancel := context.WithTimeout(context.Background(), ytdlpTimeout)
-		cmd := exec.CommandContext(ctx, ytdlp, "--no-playlist", "-o", m.Filename+".%(ext)s", "--", m.URL)
+		cmd := exec.CommandContext(ctx, ytdlp, "--no-playlist", "-o", externalTemplate, "--", m.URL)
 		cmd.Dir = dir
 		// WaitDelay closes the inherited stdout/stderr pipes after the
 		// context fires so a grandchild that outlives yt-dlp (most often
