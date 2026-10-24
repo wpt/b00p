@@ -26,7 +26,7 @@ func TestDownloadExternal_RefusesBatchWrapper(t *testing.T) {
 
 			dir := t.TempDir()
 			err := DownloadExternal(&recordingLogger{}, []parser.MediaItem{
-				{Type: "external_video", URL: "https://www.youtube.com/watch?v=abc&echo.>INJECTED", Filename: "ext"},
+				{Type: "external_video", URL: "https://www.youtube.com/watch?v=abc&echo.>INJECTED"},
 			}, dir)
 			if err == nil || !strings.Contains(err.Error(), "batch wrapper") {
 				t.Errorf("err = %v, want batch wrapper refusal", err)

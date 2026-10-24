@@ -94,7 +94,7 @@ output/<blog>/
     video_001.mp4
     audio_001.mp3
     file_001.pdf
-    external_video_002.*     with --download-external
+    external_Youtube_<id>.*  with --download-external
 ```
 
 ## Notes

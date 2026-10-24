@@ -384,7 +384,7 @@ func TestApplySignedQuery(t *testing.T) {
 		{Type: "file", URL: "https://example.com/media/3?sig=already", Filename: "file_002.pdf"},
 		{Type: "image", URL: "https://example.com/i.jpg", Filename: "image_001.jpg"},
 		{Type: "video", URL: "https://example.com/v.mp4", Filename: "video_001.mp4"},
-		{Type: "external_video", URL: "https://example.com/watch", Filename: "external_video_001"},
+		{Type: "external_video", URL: "https://example.com/watch"},
 	}
 
 	ApplySignedQuery(media, "?sign=abc")

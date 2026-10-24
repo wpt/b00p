@@ -16,8 +16,10 @@ import (
 
 // MediaItem represents a downloadable media file from a post.
 type MediaItem struct {
-	Type     string // "image", "video", "external_video", "audio", "file"
-	URL      string
+	Type string // "image", "video", "external_video", "audio", "file"
+	URL  string
+	// Filename is the file's name in the post directory. Empty for
+	// external_video: yt-dlp names those after the remote video.
 	Filename string
 	// ID is the Boosty block id of the media object. Stable across API
 	// fetches while the signed URL is not, so downloads key their resume
@@ -190,12 +192,13 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 			})
 
 		case "video":
+			// Still counts: skipping it would renumber the native
+			// video_NNN.mp4 files of existing archives.
 			vidIdx++
 			if block.URL != "" {
 				addMedia(MediaItem{
-					Type:     "external_video",
-					URL:      block.URL,
-					Filename: fmt.Sprintf("external_video_%03d", vidIdx),
+					Type: "external_video",
+					URL:  block.URL,
 				})
 			}
 
