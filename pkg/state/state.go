@@ -44,6 +44,12 @@ type PostEntry struct {
 	// disk count for such a post, so a refetch fires once per API-side
 	// change and then goes quiet.
 	CommentsCapped bool `json:"commentsCapped,omitempty"`
+	// Media maps a media filename in the post directory to the block ID of
+	// the bytes there, so an edit replaces only the files whose block
+	// changed. It is updated after every media run, failed or not, but only
+	// for files that landed: it can lag disk (costing a re-download), never
+	// name bytes that did not land.
+	Media map[string]string `json:"media,omitempty"`
 }
 
 // State tracks which posts have been downloaded for a blog.

@@ -51,6 +51,9 @@ type applyOutcome struct {
 	// can never match the API count (see downloadComments). Only meaningful
 	// when CommentsWritten.
 	CommentsCapped bool
+	// Media is the media record (state.PostEntry.Media) after the media
+	// channel ran; nil when it did not run.
+	Media map[string]string
 }
 
 // allOK reports whether every requested channel landed.
@@ -68,9 +71,9 @@ func (o applyOutcome) allOK() bool {
 //   - Media: post was Edited (block list may have changed), check-media
 //     reported a size mismatch needing fresh signed URLs, a media file is
 //     absent or empty (every sync), or check-files found post.json missing.
-//     The last two run under KeepExisting (see applyExisting): files already
-//     on disk cost a stat, and the per-post payload, not the list one,
-//     decides what is fetched.
+//     The last two run with a plan that replaces nothing (see
+//     applyExisting): files already on disk cost a stat, and the per-post
+//     payload, not the list one, decides what is fetched.
 //   - MD: this run carries WithMD (or the prior entry recorded HasMd) AND
 //     either Edited or post.md is missing from disk.
 //   - Comments: count changed (NewComments — only ever set for posts whose
@@ -133,25 +136,31 @@ func (e *Engine) applyItem(st *state.State, item syncItem) {
 // still on disk survive a run without --md / --comments, those artefacts
 // are regenerated against the fresh post, the surviving directory is reused
 // instead of being orphaned by a title change, and media is replaced only
-// when the entry's UpdatedAt says the post was edited since it fully landed.
+// when the entry's UpdatedAt says the post was edited since it fully landed,
+// and then only the files whose block changed.
 //
 // Returns true once the post's files are on disk — a failed state save is
 // logged and counted as a failure, but does not un-download the files (the
-// entry re-syncs as NEW on the next run).
+// entry re-syncs as NEW on the next run). A failed save of a tracked post
+// still records the fail-closed entry, so the retry keeps the media that
+// landed; an untracked post stays out of state, or it would stop being NEW.
 func (e *Engine) saveNewPost(st *state.State, p *boosty.Post) bool {
 	c := e.c
 	e.stMu.Lock()
-	old := st.Posts[p.ID]
+	old, tracked := st.Posts[p.ID]
 	e.stMu.Unlock()
 
 	post := e.MaybeRefreshSignedURLs(p)
 	dirName := e.pickDirName(old, post)
 	withMD := e.cfg.WithMD || old.HasMd
 	withComments := e.cfg.WithComments || old.HasComments
-	dirName, out, err := e.savePost(post, dirName, withMD, withComments, old.UpdatedAt)
+	dirName, out, err := e.savePost(post, dirName, withMD, withComments, old)
 	if err != nil {
 		c.Log.Printf("  error: %v", err)
 		e.failedPosts.Add(1)
+		if tracked && dirName != "" {
+			e.commitEntry(st, post.ID, buildSyncEntry(old, post, dirName, true, out))
+		}
 		return false
 	}
 	// savePost returns dirName="" only for !post.HasAccess. Both callers queue
@@ -183,10 +192,11 @@ func (e *Engine) pickDirName(old state.PostEntry, post *boosty.Post) string {
 }
 
 // applyExisting re-produces the artefacts an actionable update needs
-// (decideApplyActions). An Edited item replaces every media file and lets
-// buildSyncEntry advance UpdatedAt when every channel lands; a VideoMismatch
-// item replaces videos only; any other media trigger (Missing.*) fetches
-// only absent or empty files.
+// (decideApplyActions). An Edited item replaces the media files whose block
+// changed (newMediaPlan) and lets buildSyncEntry advance UpdatedAt when every
+// channel lands; a VideoMismatch item replaces the mismatched videos; any other
+// media trigger (Missing.*) replaces nothing and fetches only absent or empty
+// files.
 //
 // Requires InState=true: the entry is read from st.Posts and patched in
 // place so failed writes never advance UpdatedAt / CommentsCount past disk
@@ -226,14 +236,8 @@ func (e *Engine) applyExisting(st *state.State, item syncItem) {
 		return
 	}
 
-	mode := downloader.KeepExisting
-	switch {
-	case item.Edited:
-		mode = downloader.ReplaceAll
-	case item.VideoMismatch != "":
-		mode = downloader.ReplaceVideos
-	}
-	out, err := e.runApplyActions(dir, &fullPost, mode, actions)
+	media := newMediaPlan(dir, old, item.Edited, item.MismatchedVideos)
+	out, err := e.runApplyActions(dir, &fullPost, media, actions)
 	if err != nil {
 		// Logged here, not inside runApplyActions, so a post fails once in
 		// the log; state below still records whatever did land.
@@ -303,7 +307,7 @@ func (e *Engine) fetchFullPost(classified boosty.Post, actions applyActions) (bo
 // Block parsing only happens when media or md consume it; a comments-only
 // update skips the parse cost. External videos ride along with the media
 // channel as best-effort (yt-dlp failures are logged, never fatal).
-func (e *Engine) runApplyActions(dir string, post *boosty.Post, mode downloader.Mode, actions applyActions) (applyOutcome, error) {
+func (e *Engine) runApplyActions(dir string, post *boosty.Post, media mediaPlan, actions applyActions) (applyOutcome, error) {
 	c := e.c
 	out := applyOutcome{
 		PostJSONOK: !actions.Post,
@@ -327,7 +331,9 @@ func (e *Engine) runApplyActions(dir string, post *boosty.Post, mode downloader.
 	}
 
 	if actions.Media {
-		if err := downloader.DownloadMedia(c, parsed.Media, dir, mode); err != nil {
+		landed, err := downloader.DownloadMedia(c, parsed.Media, dir, media.replaces)
+		out.Media = media.record(landed)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("media: %w", err))
 		} else {
 			out.MediaOK = true
@@ -398,6 +404,9 @@ func applyBackfill(st *state.State, items []syncItem) {
 //     comments were freshly written this run.
 //   - HasMd only advances to true when post.md was freshly written; an
 //     existing true value is preserved by virtue of starting from `old`.
+//   - Media follows every media run, failed or not: it names only bytes
+//     that landed, so the retry of a failed edit replaces only what is
+//     still stale.
 //
 // Pure function — no I/O — so the contract is table-testable.
 func buildSyncEntry(old state.PostEntry, post *boosty.Post, dirName string,
@@ -421,6 +430,9 @@ func buildSyncEntry(old state.PostEntry, post *boosty.Post, dirName string,
 	}
 	if out.MDWritten {
 		entry.HasMd = true
+	}
+	if out.Media != nil {
+		entry.Media = out.Media
 	}
 	return entry
 }

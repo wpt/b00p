@@ -838,7 +838,8 @@ func TestEngine_ApplyItem_VideoMismatchFailedRedownloadKeepsOldFile(t *testing.T
 	}
 	e.applyItem(st, syncItem{
 		Post: post, DirName: "p1_dir", Existing: st.Posts["p1"], InState: true,
-		VideoMismatch: "video_001.mp4: local 15 B vs remote 99 B",
+		VideoMismatch:    "video_001.mp4: local 15 B vs remote 99 B",
+		MismatchedVideos: []string{"video_001.mp4"},
 	})
 
 	if data, _ := os.ReadFile(filepath.Join(postDir, "video_001.mp4")); string(data) != "old-video-bytes" {

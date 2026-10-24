@@ -76,8 +76,8 @@ func detectMissingFiles(entry state.PostEntry, dir string) missingFiles {
 }
 
 // missingMedia reports whether any media file the post's blocks name is
-// absent from dir or empty — the same rule downloader.KeepExisting
-// re-downloads by. Local stats only: the contents are never read, so a
+// absent from dir or empty — the same rule Download fetches by for a file
+// the media plan does not replace. Local stats only: the contents are never read, so a
 // truncated non-empty file passes. External videos are skipped: they are
 // links unless --download-external, and yt-dlp picks their extension.
 //
@@ -118,10 +118,11 @@ func (e *Engine) runCheckMedia(blogDir string, items []syncItem) {
 	runWorkerPool(e.cfg.Workers, jobs, func(idx int) {
 		post := items[idx].Post
 		dir := filepath.Join(blogDir, items[idx].DirName)
-		mismatch := e.checkVideoSizes(&post, dir)
+		mismatch, files := e.checkVideoSizes(&post, dir)
 		if mismatch != "" {
 			// Distinct indices per worker → safe write.
 			items[idx].VideoMismatch = mismatch
+			items[idx].MismatchedVideos = files
 		}
 	})
 }
@@ -129,21 +130,22 @@ func (e *Engine) runCheckMedia(blogDir string, items []syncItem) {
 // checkVideoSizes validates local video files against remote for a post.
 // Skips posts with no native video (ok_video) — nothing to verify. Otherwise
 // fetches fresh video URLs and does authenticated HEAD requests, collecting
-// all mismatches rather than bailing on the first one.
-func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) string {
+// all mismatches rather than bailing on the first one. Returns the joined
+// issues and the filenames they are about.
+func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) (string, []string) {
 	if !hasOkVideo(post.Data) {
-		return ""
+		return "", nil
 	}
 
 	c := e.c
 	var fullPost boosty.Post
 	if err := c.GetJSON(boosty.PostURL(e.cfg.Blog, post.ID), &fullPost); err != nil {
 		c.Log.Printf("  check-media %s: fetch failed: %v", post.ID, err)
-		return ""
+		return "", nil
 	}
 
 	parsed := parser.ParseBlocks(fullPost.Data)
-	var issues []string
+	var issues, files []string
 	for _, m := range parsed.Media {
 		if m.Type != "video" {
 			continue
@@ -151,9 +153,10 @@ func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) string {
 		if issue := checkRemoteVideoSize(c.HTTP, boosty.UserAgent, c.Log,
 			m.URL, filepath.Join(dir, m.Filename), m.Filename); issue != "" {
 			issues = append(issues, issue)
+			files = append(files, m.Filename)
 		}
 	}
-	return strings.Join(issues, "; ")
+	return strings.Join(issues, "; "), files
 }
 
 // hasOkVideo reports whether any block is a native (ok_video) video.
