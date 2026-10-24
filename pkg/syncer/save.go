@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 
 	"github.com/wpt/b00p/pkg/boosty"
-	"github.com/wpt/b00p/pkg/downloader"
 	"github.com/wpt/b00p/pkg/fileutil"
 	"github.com/wpt/b00p/pkg/parser"
+	"github.com/wpt/b00p/pkg/state"
 )
 
 // commentsPageLimit is the per-page limit for the comments listing endpoint.
@@ -72,7 +72,7 @@ func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err e
 		defer unlock()
 	}
 	name := parser.FormatDirName(e.cfg.DirFormat, post.Title, post.PublishTime, post.ID)
-	dirName, out, err := e.savePost(post, name, e.cfg.WithMD, e.cfg.WithComments, 0)
+	dirName, out, err := e.savePost(post, name, e.cfg.WithMD, e.cfg.WithComments, state.PostEntry{})
 	return dirName, out.CommentsCapped, err
 }
 
@@ -80,13 +80,14 @@ func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err e
 // caller's record of the post supplied explicitly: saveNewPost takes them
 // from a prior state entry, SavePost from Config (and has no record).
 //
-// savedUpdatedAt is the updatedAt of the last copy whose media fully landed
-// (state.PostEntry.UpdatedAt); 0 means unknown and the on-disk post.json
-// stands in. State must win over disk: runApplyActions writes post.json
-// before media, so after an edit whose media replacement failed, disk
-// already carries the new updatedAt next to the old bytes, and trusting it
-// would keep them and then advance state past them on the retry.
-func (e *Engine) savePost(post *boosty.Post, dirName string, withMD, withComments bool, savedUpdatedAt int64) (string, applyOutcome, error) {
+// old.UpdatedAt is the updatedAt of the last copy whose media fully landed;
+// 0 means unknown and the on-disk post.json stands in. State must win over
+// disk: runApplyActions writes post.json before media, so after an edit
+// whose media replacement failed, disk already carries the new updatedAt
+// next to the old bytes, and trusting it would keep them and then advance
+// state past them on the retry. An edit replaces only the files whose block
+// changed (newMediaPlan), or every file when nothing records what landed.
+func (e *Engine) savePost(post *boosty.Post, dirName string, withMD, withComments bool, old state.PostEntry) (string, applyOutcome, error) {
 	if !post.HasAccess {
 		e.c.Log.Printf("  skipping (no access): %s", post.Title)
 		return "", applyOutcome{}, nil
@@ -102,17 +103,16 @@ func (e *Engine) savePost(post *boosty.Post, dirName string, withMD, withComment
 	// A copy saved against a different updatedAt may hold media that the
 	// edit replaced at the same filename, which the skip-existing check
 	// would keep.
-	prev, known := savedUpdatedAt, savedUpdatedAt != 0
+	prev, known := old.UpdatedAt, old.UpdatedAt != 0
 	if !known {
 		prev, known = readPostUpdatedAt(dir)
 	}
-	mode := downloader.KeepExisting
-	if known && prev != post.UpdatedAt {
-		e.c.Log.Printf("  post edited since last save; re-downloading media: %s", post.Title)
-		mode = downloader.ReplaceAll
+	edited := known && prev != post.UpdatedAt
+	if edited {
+		e.c.Log.Printf("  post edited since last save; re-downloading changed media: %s", post.Title)
 	}
 
-	out, err := e.runApplyActions(dir, post, mode, applyActions{
+	out, err := e.runApplyActions(dir, post, newMediaPlan(dir, old, edited, nil), applyActions{
 		Post:     true,
 		Media:    true,
 		MD:       withMD,

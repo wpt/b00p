@@ -65,7 +65,7 @@ func TestDownloadMedia_NilOnEmpty(t *testing.T) {
 	c := newTestClient(server, log)
 
 	dir := t.TempDir()
-	err := DownloadMedia(c, nil, dir, KeepExisting)
+	_, err := DownloadMedia(c, nil, dir, nil)
 	if err != nil {
 		t.Fatalf("DownloadMedia with no media: %v, want nil", err)
 	}
@@ -90,7 +90,7 @@ func TestDownloadMedia_SkipsExternalVideos(t *testing.T) {
 		{Type: "external_video", URL: "https://vk.com/video123"},
 	}
 	dir := t.TempDir()
-	err := DownloadMedia(c, media, dir, KeepExisting)
+	_, err := DownloadMedia(c, media, dir, nil)
 	if err != nil {
 		t.Fatalf("DownloadMedia: %v, want nil", err)
 	}
@@ -123,7 +123,7 @@ func TestDownloadMedia_Success(t *testing.T) {
 		{Type: "image", URL: server.URL + "/a.jpg", Filename: "a.jpg"},
 		{Type: "image", URL: server.URL + "/b.jpg", Filename: "b.jpg"},
 	}
-	if err := DownloadMedia(c, media, dir, KeepExisting); err != nil {
+	if _, err := DownloadMedia(c, media, dir, nil); err != nil {
 		t.Fatalf("DownloadMedia: %v, want nil", err)
 	}
 
@@ -170,9 +170,12 @@ func TestDownloadMedia_MixedSuccessAndFailure(t *testing.T) {
 		{Type: "image", URL: server.URL + "/bad1.jpg", Filename: "bad1.jpg"},
 		{Type: "image", URL: server.URL + "/bad2.jpg", Filename: "bad2.jpg"},
 	}
-	err := DownloadMedia(c, media, dir, KeepExisting)
+	landed, err := DownloadMedia(c, media, dir, nil)
 	if err == nil {
 		t.Fatal("DownloadMedia: nil, want non-nil error from failing items")
+	}
+	if len(landed) != 1 || landed[0].Filename != "good.jpg" {
+		t.Errorf("landed = %+v, want only good.jpg", landed)
 	}
 
 	msg := err.Error()
@@ -194,10 +197,10 @@ func TestDownloadMedia_MixedSuccessAndFailure(t *testing.T) {
 	}
 }
 
-// ReplaceVideos re-downloads native videos over their existing copies and
-// leaves other media alone; ReplaceAll refreshes everything. KeepExisting
-// (the first-download mode) touches nothing that is already on disk.
-func TestDownloadMedia_ReplaceModes(t *testing.T) {
+// replace picks the items downloaded over their existing copies; the rest
+// are kept, and a nil replace (the first-download mode) touches nothing that
+// is already on disk. Kept and replaced items both count as landed.
+func TestDownloadMedia_Replace(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "new-"+strings.TrimPrefix(r.URL.Path, "/"))
 	}))
@@ -226,19 +229,23 @@ func TestDownloadMedia_ReplaceModes(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		mode       Mode
-		wantImage  string
-		wantVideo  string
-		modeString string
+		name      string
+		replace   func(parser.MediaItem) bool
+		wantImage string
+		wantVideo string
 	}{
-		{KeepExisting, "old", "old", "KeepExisting"},
-		{ReplaceVideos, "old", "new-vid", "ReplaceVideos"},
-		{ReplaceAll, "new-img", "new-vid", "ReplaceAll"},
+		{"nil", nil, "old", "old"},
+		{"video only", func(m parser.MediaItem) bool { return m.ID == "v1" }, "old", "new-vid"},
+		{"all", func(parser.MediaItem) bool { return true }, "new-img", "new-vid"},
 	} {
-		t.Run(tc.modeString, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := seed(t)
-			if err := DownloadMedia(c, media, dir, tc.mode); err != nil {
+			landed, err := DownloadMedia(c, media, dir, tc.replace)
+			if err != nil {
 				t.Fatalf("DownloadMedia: %v", err)
+			}
+			if len(landed) != len(media) {
+				t.Errorf("landed %d items, want %d (kept files count)", len(landed), len(media))
 			}
 			if got := read(t, dir, "image_001.jpg"); got != tc.wantImage {
 				t.Errorf("image = %q, want %q", got, tc.wantImage)
@@ -265,7 +272,7 @@ func TestDownloadMedia_MkdirFailure(t *testing.T) {
 	// blocker is a regular file; MkdirAll(blocker/sub) must fail.
 	bad := filepath.Join(blocker, "sub")
 
-	err := DownloadMedia(c, []parser.MediaItem{{Type: "image", URL: "http://example", Filename: "x.jpg"}}, bad, KeepExisting)
+	_, err := DownloadMedia(c, []parser.MediaItem{{Type: "image", URL: "http://example", Filename: "x.jpg"}}, bad, nil)
 	if err == nil {
 		t.Fatal("DownloadMedia under un-mkdir-able dir: nil, want error")
 	}

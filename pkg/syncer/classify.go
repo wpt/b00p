@@ -41,8 +41,9 @@ type syncItem struct {
 	// post.Count.Comments.
 	DiskCommentCount int
 
-	VideoMismatch string       // detail string (empty = no mismatch)
-	Missing       missingFiles // file existence check result
+	VideoMismatch    string       // detail string (empty = no mismatch)
+	MismatchedVideos []string     // filenames behind VideoMismatch; the apply replaces only these
+	Missing          missingFiles // file existence check result
 }
 
 // IsActionable reports whether the item needs apply-phase work beyond a
@@ -185,9 +186,10 @@ func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 		item.BackfillUpdatedAt = true
 	}
 
-	// Deleted or empty media comes back without a flag, through KeepExisting
-	// (applyExisting). An edited post replaces all of its media anyway, and
-	// files its edit added would read as missing here.
+	// Deleted or empty media comes back without a flag, through a plan that
+	// replaces nothing (applyExisting). An edited post runs the media channel
+	// anyway, which fetches absent files too, and files its edit added would
+	// read as missing here.
 	if !item.Edited {
 		item.Missing.Media = missingMedia(post.Data, dir)
 	}
