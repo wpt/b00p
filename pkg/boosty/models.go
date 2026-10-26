@@ -17,6 +17,9 @@ type PaginationExtra struct {
 
 // Post represents a single blog post.
 type Post struct {
+	// RawJSON holds an owned snapshot of the API response for lossless archival.
+	// It is excluded from ordinary JSON marshaling, which still uses typed fields.
+	RawJSON           json.RawMessage    `json:"-"`
 	ID                string             `json:"id"`
 	Title             string             `json:"title"`
 	CreatedAt         int64              `json:"createdAt"`
@@ -31,6 +34,18 @@ type Post struct {
 	Tags              []Tag              `json:"tags"`
 	Count             PostCount          `json:"count"`
 	SignedQuery       string             `json:"signedQuery"`
+}
+
+// UnmarshalJSON retains fields outside the typed model, including nested ones.
+func (p *Post) UnmarshalJSON(data []byte) error {
+	type plainPost Post
+	var decoded plainPost
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = Post(decoded)
+	p.RawJSON = append(json.RawMessage(nil), data...)
+	return nil
 }
 
 // IsStub reports whether the per-post endpoint returned a degraded payload:

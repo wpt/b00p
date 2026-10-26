@@ -262,11 +262,13 @@ output/username/
 
 `post.json` always contains links to external videos. `post.md` includes them only when generated with `--md`.
 
+Unmodified posts decoded from the API retain their original JSON fields in `post.json`, including unknown fields and nested block metadata. JSON indentation may change. For Go library callers, constructed posts or posts whose typed fields were edited use ordinary typed serialization so those edits are not discarded; unknown fields are not retained in that case. Ordinary `json.Marshal(post)` continues to serialize typed fields.
+
 Audio and file attachments get numbered on-disk names (`audio_001.mp3`, `file_001.pdf`) with the extension taken from the author's original filename (falling back to the URL when the name has none); `post.md` links each one under its original name when the author supplied one, so nothing readable is lost.
 
 `index.md` is a clickable list of every tracked post (title → directory, comment counts, locked markers), sorted by directory name — chronological under the default `{date}_{title}` format. It is regenerated from `_state.json` at the end of every `--blog` download/sync run, including no-change runs, so deleting it self-heals (single-post `--url` downloads don't touch it). Don't edit it by hand.
 
-Content block types b00p doesn't support yet (e.g. polls) are skipped with a per-post warning naming the type — if you see one, that content exists on Boosty but is not in your archive.
+Content block types b00p doesn't support yet (e.g. polls) are skipped with a per-post warning naming the type. They are not rendered in Markdown or downloaded, but their source fields remain in `post.json` for unmodified API posts.
 
 Native videos are downloaded only when Boosty offers a direct MP4 variant. A video published as HLS/DASH only is skipped with a `had no MP4 URL — only HLS/DASH variants` warning; the post still saves and counts as complete, and `--check-media` won't flag it afterwards because there is no local file to compare. That warning during the run is your only notice, so watch for it — grab such videos manually with yt-dlp if you need them.
 
