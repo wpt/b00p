@@ -32,6 +32,8 @@ type MediaItem struct {
 // ParsedContent is the result of parsing a post's content blocks.
 type ParsedContent struct {
 	TextParts []string
+	// BodyParts contains Markdown paragraphs and media references in source order.
+	BodyParts []string
 	Media     []MediaItem
 	// SkippedVideos counts ok_video blocks that had no usable MP4 URL
 	// (only HLS/DASH variants, or every MP4 URL was empty). The block was
@@ -109,113 +111,187 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 		para = para[:0]
 		if joined != "" {
 			result.TextParts = append(result.TextParts, joined)
+			result.BodyParts = append(result.BodyParts, joined)
 		}
 	}
 
-	for _, block := range blocks {
-		switch block.Type {
-		case "text":
-			if block.Modificator == "BLOCK_END" {
+	addMedia := func(m MediaItem) {
+		result.Media = append(result.Media, m)
+		result.BodyParts = append(result.BodyParts, mediaMarkdown(m))
+	}
+
+	var walk func([]boosty.ContentBlock)
+	var walkList func([]boosty.ListItem, string)
+	walkList = func(items []boosty.ListItem, style string) {
+		var entries []string
+		for i, item := range items {
+			start := len(result.BodyParts)
+			walk(item.Data)
+			content := strings.Join(result.BodyParts[start:], "\n\n")
+			result.BodyParts = result.BodyParts[:start]
+			if len(item.Items) > 0 {
+				walkList(item.Items, style)
+				nested := strings.Join(result.BodyParts[start:], "\n")
+				result.BodyParts = result.BodyParts[:start]
+				if nested != "" {
+					if content != "" {
+						content += "\n"
+					}
+					content += nested
+				}
+			}
+			if content == "" {
+				continue
+			}
+			marker := "- "
+			if style == "ordered" {
+				marker = fmt.Sprintf("%d. ", i+1)
+			}
+			indent := strings.Repeat(" ", len(marker))
+			lines := strings.Split(content, "\n")
+			for j := 1; j < len(lines); j++ {
+				if lines[j] != "" {
+					lines[j] = indent + lines[j]
+				}
+			}
+			entries = append(entries, marker+strings.Join(lines, "\n"))
+		}
+		if len(entries) > 0 {
+			result.BodyParts = append(result.BodyParts, strings.Join(entries, "\n"))
+		}
+	}
+
+	walk = func(blocks []boosty.ContentBlock) {
+		for _, block := range blocks {
+			switch block.Type {
+			case "text":
+				if block.Modificator == "BLOCK_END" {
+					flushPara()
+					continue
+				}
+				if text := ExtractText(block.Content); text != "" {
+					para = append(para, text)
+				}
+
+			case "header":
 				flushPara()
-				continue
-			}
-			if text := ExtractText(block.Content); text != "" {
-				para = append(para, text)
-			}
+				text := collapseWhitespace(ExtractText(block.Content))
+				if text == "" {
+					continue
+				}
+				var content []json.RawMessage
+				var style string
+				if json.Unmarshal([]byte(block.Content), &content) == nil && len(content) > 1 {
+					_ = json.Unmarshal(content[1], &style)
+				}
+				level := map[string]int{"header-one": 1, "header-two": 2, "header-three": 3,
+					"header-four": 4, "header-five": 5, "header-six": 6}[style]
+				if level == 0 {
+					level = 2
+				}
+				heading := strings.Repeat("#", level) + " " + text
+				result.TextParts = append(result.TextParts, heading)
+				result.BodyParts = append(result.BodyParts, heading)
 
-		case "image":
-			flushPara()
-			imgIdx++
-			imgURL := block.URL
-			if imgURL == "" {
-				continue
-			}
-			ext := imageExt(imgURL)
-			filename := fmt.Sprintf("image_%03d%s", imgIdx, ext)
-			result.Media = append(result.Media, MediaItem{
-				Type:     "image",
-				URL:      imgURL,
-				Filename: filename,
-				ID:       block.ID,
-			})
+			case "list":
+				flushPara()
+				walkList(block.Items, block.Style)
 
-		case "ok_video":
-			flushPara()
-			vidIdx++
-			vidURL := BestMP4URL(block.PlayerURLs)
-			if vidURL == "" {
-				result.SkippedVideos++
-				continue
-			}
-			filename := fmt.Sprintf("video_%03d.mp4", vidIdx)
-			result.Media = append(result.Media, MediaItem{
-				Type:     "video",
-				URL:      vidURL,
-				Filename: filename,
-				ID:       block.ID,
-			})
-
-		case "video":
-			flushPara()
-			vidIdx++
-			if block.URL != "" {
-				result.Media = append(result.Media, MediaItem{
-					Type:     "external_video",
-					URL:      block.URL,
-					Filename: fmt.Sprintf("external_video_%03d", vidIdx),
+			case "image":
+				flushPara()
+				imgIdx++
+				imgURL := block.URL
+				if imgURL == "" {
+					continue
+				}
+				ext := imageExt(imgURL)
+				filename := fmt.Sprintf("image_%03d%s", imgIdx, ext)
+				addMedia(MediaItem{
+					Type:     "image",
+					URL:      imgURL,
+					Filename: filename,
+					ID:       block.ID,
 				})
-			}
 
-		case "audio_file":
-			flushPara()
-			audIdx++
-			if block.URL == "" {
-				continue
-			}
-			result.Media = append(result.Media, MediaItem{
-				Type:     "audio",
-				URL:      block.URL,
-				Title:    block.Title,
-				Filename: fmt.Sprintf("audio_%03d%s", audIdx, attachmentExt(block.Title, block.URL, ".mp3")),
-				ID:       block.ID,
-			})
+			case "ok_video":
+				flushPara()
+				vidIdx++
+				vidURL := BestMP4URL(block.PlayerURLs)
+				if vidURL == "" {
+					result.SkippedVideos++
+					continue
+				}
+				filename := fmt.Sprintf("video_%03d.mp4", vidIdx)
+				addMedia(MediaItem{
+					Type:     "video",
+					URL:      vidURL,
+					Filename: filename,
+					ID:       block.ID,
+				})
 
-		case "file":
-			flushPara()
-			fileIdx++
-			if block.URL == "" {
-				continue
-			}
-			result.Media = append(result.Media, MediaItem{
-				Type:     "file",
-				URL:      block.URL,
-				Title:    block.Title,
-				Filename: fmt.Sprintf("file_%03d%s", fileIdx, attachmentExt(block.Title, block.URL, "")),
-				ID:       block.ID,
-			})
+			case "video":
+				flushPara()
+				vidIdx++
+				if block.URL != "" {
+					addMedia(MediaItem{
+						Type:     "external_video",
+						URL:      block.URL,
+						Filename: fmt.Sprintf("external_video_%03d", vidIdx),
+					})
+				}
 
-		case "link":
-			text := ExtractText(block.Content)
-			if strings.TrimSpace(text) == "" {
-				text = block.URL
-			}
-			if text == "" {
-				// Neither label nor URL — nothing to archive.
-				continue
-			}
-			// formatMarkdownLink degrades to the bare escaped label when the
-			// URL is empty (editor artifact, dead link) — the author's text
-			// must not vanish from the archive with it.
-			para = append(para, formatMarkdownLink(text, block.URL))
+			case "audio_file":
+				flushPara()
+				audIdx++
+				if block.URL == "" {
+					continue
+				}
+				addMedia(MediaItem{
+					Type:     "audio",
+					URL:      block.URL,
+					Title:    block.Title,
+					Filename: fmt.Sprintf("audio_%03d%s", audIdx, attachmentExt(block.Title, block.URL, ".mp3")),
+					ID:       block.ID,
+				})
 
-		default:
-			flushPara()
-			if !slices.Contains(result.UnknownTypes, block.Type) {
-				result.UnknownTypes = append(result.UnknownTypes, block.Type)
+			case "file":
+				flushPara()
+				fileIdx++
+				if block.URL == "" {
+					continue
+				}
+				addMedia(MediaItem{
+					Type:     "file",
+					URL:      block.URL,
+					Title:    block.Title,
+					Filename: fmt.Sprintf("file_%03d%s", fileIdx, attachmentExt(block.Title, block.URL, "")),
+					ID:       block.ID,
+				})
+
+			case "link":
+				text := ExtractText(block.Content)
+				if strings.TrimSpace(text) == "" {
+					text = block.URL
+				}
+				if text == "" {
+					// Neither label nor URL — nothing to archive.
+					continue
+				}
+				// formatMarkdownLink degrades to the bare escaped label when the
+				// URL is empty (editor artifact, dead link) — the author's text
+				// must not vanish from the archive with it.
+				para = append(para, formatMarkdownLink(text, block.URL))
+
+			default:
+				flushPara()
+				if !slices.Contains(result.UnknownTypes, block.Type) {
+					result.UnknownTypes = append(result.UnknownTypes, block.Type)
+				}
 			}
 		}
+		flushPara()
 	}
-	flushPara()
+	walk(blocks)
 
 	return result
 }

@@ -81,8 +81,16 @@ type PostCount struct {
 	Comments int `json:"comments"`
 }
 
-// ContentBlock is a piece of post content (text, image, video, link).
+// ListItem is a list entry with content and nested entries.
+type ListItem struct {
+	Data  []ContentBlock `json:"data"`
+	Items []ListItem     `json:"items,omitempty"`
+}
+
+// ContentBlock is a piece of post content, including structured headings/lists.
 type ContentBlock struct {
+	Style          string      `json:"style,omitempty"`
+	Items          []ListItem  `json:"items,omitempty"`
 	Type           string      `json:"type"`
 	ID             string      `json:"id,omitempty"`
 	URL            string      `json:"url,omitempty"`

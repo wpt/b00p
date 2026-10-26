@@ -50,32 +50,36 @@ func GenerateMarkdown(post *boosty.Post, parsed ParsedContent) string {
 	// split the H1 across lines.
 	b.WriteString(fmt.Sprintf("# %s\n\n", collapseWhitespace(post.Title)))
 
-	// Text content
-	for _, text := range parsed.TextParts {
-		b.WriteString(text)
+	parts := parsed.BodyParts
+	if parts == nil {
+		// Keep callers that assemble ParsedContent themselves working.
+		parts = append(parts, parsed.TextParts...)
+		for _, m := range parsed.Media {
+			parts = append(parts, mediaMarkdown(m))
+		}
+	}
+	for _, part := range parts {
+		b.WriteString(part)
 		b.WriteString("\n\n")
 	}
 
-	// Media references
-	for _, m := range parsed.Media {
-		switch m.Type {
-		case "image":
-			// m.Filename is parser-generated ("image_001.jpg") — no markdown
-			// metacharacters possible, so no escaping is needed.
-			b.WriteString(fmt.Sprintf("![%s](%s)\n\n", m.Filename, m.Filename))
-		case "video":
-			b.WriteString(fmt.Sprintf("[Video: %s](%s)\n\n", m.Filename, m.Filename))
-		case "audio":
-			b.WriteString(fmt.Sprintf("[Audio: %s](%s)\n\n", attachmentLabel(m), m.Filename))
-		case "file":
-			b.WriteString(fmt.Sprintf("[File: %s](%s)\n\n", attachmentLabel(m), m.Filename))
-		case "external_video":
-			b.WriteString(formatMarkdownLink("External Video", m.URL))
-			b.WriteString("\n\n")
-		}
-	}
-
 	return b.String()
+}
+
+func mediaMarkdown(m MediaItem) string {
+	switch m.Type {
+	case "image":
+		return fmt.Sprintf("![%s](%s)", m.Filename, m.Filename)
+	case "video":
+		return fmt.Sprintf("[Video: %s](%s)", m.Filename, m.Filename)
+	case "audio":
+		return fmt.Sprintf("[Audio: %s](%s)", attachmentLabel(m), m.Filename)
+	case "file":
+		return fmt.Sprintf("[File: %s](%s)", attachmentLabel(m), m.Filename)
+	case "external_video":
+		return formatMarkdownLink("External Video", m.URL)
+	}
+	return ""
 }
 
 // attachmentLabel is the link label for an audio/file attachment: the
