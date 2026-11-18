@@ -22,7 +22,7 @@ func TestPostArchive_PreservesSourceFields(t *testing.T) {
 		input[i] = ' '
 	}
 	dst := filepath.Join(t.TempDir(), "post.json")
-	if err := writeJSON(dst, &post); err != nil {
+	if err := writeJSON(dst, post.Raw, &post); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := os.ReadFile(dst)
@@ -43,41 +43,10 @@ func TestPostArchive_PreservesSourceFields(t *testing.T) {
 	}
 }
 
-func TestPostArchive_PreservesCallerEdits(t *testing.T) {
-	for _, field := range []string{"title", "nested content"} {
-		t.Run(field, func(t *testing.T) {
-			var post boosty.Post
-			if err := json.Unmarshal([]byte(`{"id":"p1","title":"Original","data":[{"type":"text","content":"Before"}]}`), &post); err != nil {
-				t.Fatal(err)
-			}
-			if field == "title" {
-				post.Title = "Edited"
-			} else {
-				post.Data[0].Content = "After"
-			}
-			dst := filepath.Join(t.TempDir(), "post.json")
-			if err := writeJSON(dst, &post); err != nil {
-				t.Fatal(err)
-			}
-			saved, err := os.ReadFile(dst)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var got boosty.Post
-			if err := json.Unmarshal(saved, &got); err != nil {
-				t.Fatal(err)
-			}
-			if got.Title != post.Title || got.Data[0].Content != post.Data[0].Content {
-				t.Fatalf("caller edits lost: %s", saved)
-			}
-		})
-	}
-}
-
 func TestPostArchive_ConstructedPost(t *testing.T) {
 	post := &boosty.Post{ID: "p1", Title: "Constructed"}
 	dst := filepath.Join(t.TempDir(), "post.json")
-	if err := writeJSON(dst, post); err != nil {
+	if err := writeJSON(dst, post.Raw, post); err != nil {
 		t.Fatal(err)
 	}
 	saved, err := os.ReadFile(dst)

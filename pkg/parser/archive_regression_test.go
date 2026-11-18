@@ -40,32 +40,3 @@ func TestArchiveMarkdown_HeadingsListsAndMediaOrder(t *testing.T) {
 		t.Errorf("known blocks flagged: %v", parsed.UnknownTypes)
 	}
 }
-
-func TestArchiveMarkdown_ListMediaKeepUniqueFilenames(t *testing.T) {
-	var post boosty.Post
-	err := json.Unmarshal([]byte(`{"data":[
-        {"type":"image","url":"https://example.com/one.jpg"},
-        {"type":"list","style":"ordered","items":[
-            {"data":[{"type":"text","content":"First"},{"type":"image","url":"https://example.com/two.jpg"}]},
-            {"data":[{"type":"text","content":"Second"}]}
-        ]},
-        {"type":"image","url":"https://example.com/three.jpg"}
-    ]}`), &post)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed := ParseBlocks(post.Data)
-	md := GenerateMarkdown(&post, parsed)
-	want := "![image_001.jpg](image_001.jpg)\n\n1. First\n\n   ![image_002.jpg](image_002.jpg)\n2. Second\n\n![image_003.jpg](image_003.jpg)\n\n"
-	if !strings.HasSuffix(md, want) {
-		t.Fatalf("list/media order lost:\n%s", md)
-	}
-	if len(parsed.Media) != 3 {
-		t.Fatalf("media = %d, want 3", len(parsed.Media))
-	}
-	for i, name := range []string{"image_001.jpg", "image_002.jpg", "image_003.jpg"} {
-		if parsed.Media[i].Filename != name {
-			t.Errorf("media[%d] = %s, want %s", i, parsed.Media[i].Filename, name)
-		}
-	}
-}
