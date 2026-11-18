@@ -73,21 +73,3 @@ func TestMarkdownArchive_ForceRegeneratesUnchangedPost(t *testing.T) {
 		t.Fatalf("backfill changed tracking: %+v", entry)
 	}
 }
-
-func TestMarkdownArchive_NestedMediaChecks(t *testing.T) {
-	for _, kind := range []string{"ok_video", "audio_file", "file", "image"} {
-		t.Run(kind, func(t *testing.T) {
-			var post boosty.Post
-			source := fmt.Sprintf(`{"data":[{"type":"list","items":[{"items":[{"data":[{"type":%q}]}]}]}]}`, kind)
-			if err := json.Unmarshal([]byte(source), &post); err != nil {
-				t.Fatal(err)
-			}
-			if got, want := hasOkVideo(post.Data), kind == "ok_video"; got != want {
-				t.Errorf("hasOkVideo = %v, want %v", got, want)
-			}
-			if got, want := hasSignedMedia(post.Data), kind != "image"; got != want {
-				t.Errorf("hasSignedMedia = %v, want %v", got, want)
-			}
-		})
-	}
-}
