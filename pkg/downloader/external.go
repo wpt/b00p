@@ -76,9 +76,13 @@ func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) e
 		// (output/blog/post/output/blog/post/file.mp4) when dir is relative.
 		// `--` stops yt-dlp from interpreting a URL that begins with `-` as a
 		// flag (e.g. `--exec=...`), which would otherwise let a hostile post
-		// smuggle arbitrary args through the embed.
+		// smuggle arbitrary args through the embed. The user's yt-dlp config
+		// still applies (cookies, formats), but -P and --download-archive there
+		// would land the video outside the post dir or skip it as already
+		// archived; command-line options override the config.
 		ctx, cancel := context.WithTimeout(context.Background(), ytdlpTimeout)
-		cmd := exec.CommandContext(ctx, ytdlp, "--no-playlist", "-o", externalTemplate, "--", m.URL)
+		cmd := exec.CommandContext(ctx, ytdlp, "--no-playlist", "-P", ".", "--no-download-archive",
+			"-o", externalTemplate, "--", m.URL)
 		cmd.Dir = dir
 		// WaitDelay closes the inherited stdout/stderr pipes after the
 		// context fires so a grandchild that outlives yt-dlp (most often
