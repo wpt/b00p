@@ -3,7 +3,6 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -45,22 +44,24 @@ func runStat(cmd *cobra.Command, args []string) error {
 
 	// Who is me
 	fmt.Println("=== Who Is Me ===")
-	var subs boosty.SubscriptionsResponse
-	if err := c.GetJSON(boosty.UserSubscriptionsURL(), &subs); err != nil {
+	sub, found, err := findSubscription(c, statBlog)
+	switch {
+	case err != nil:
 		c.Log.Printf("  warning: could not fetch subscriptions: %v", err)
 		fmt.Println("  Subscription info unavailable")
-	} else if i := slices.IndexFunc(subs.Data, func(s boosty.Subscription) bool {
-		return strings.EqualFold(s.Blog.BlogURL, statBlog)
-	}); i < 0 {
+	case !found:
 		fmt.Printf("  No active subscription to %s\n", statBlog)
-	} else {
-		sub := subs.Data[i]
-		fmt.Printf("  Blog:   %s\n", sub.Blog.BlogURL)
-		fmt.Printf("  Tier:   %s\n", sub.Name)
-		fmt.Printf("  Price:  %g RUB\n", sub.Price)
-		if sub.IsPaused {
+	default:
+		fmt.Printf("  Blog:   %s\n", termSafe(sub.Blog.BlogURL))
+		fmt.Printf("  Tier:   %s\n", termSafe(sub.Name))
+		// In the account's display currency, which the payload does not name.
+		fmt.Printf("  Price:  %g\n", sub.Price)
+		switch {
+		case sub.IsSuspended:
+			fmt.Println("  Status: SUSPENDED")
+		case sub.IsPaused:
 			fmt.Println("  Status: PAUSED")
-		} else {
+		default:
 			fmt.Println("  Status: Active")
 		}
 	}
@@ -96,4 +97,17 @@ func runStat(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Locked:       %d\n", locked)
 
 	return nil
+}
+
+// findSubscription pages through the user's subscriptions for blog.
+func findSubscription(c *boosty.Client, blog string) (boosty.Subscription, bool, error) {
+	for s, err := range c.FetchSubscriptions(boosty.SubscriptionsPageLimit) {
+		if err != nil {
+			return boosty.Subscription{}, false, err
+		}
+		if strings.EqualFold(s.Blog.BlogURL, blog) {
+			return s, true, nil
+		}
+	}
+	return boosty.Subscription{}, false, nil
 }

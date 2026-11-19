@@ -48,7 +48,8 @@ func CommentsURL(blogName, postID string, limit int) string {
 		BaseURL, blogName, postID, limit, defaultReplyLimit)
 }
 
-// UserSubscriptionsURL returns the URL for the current user's subscriptions.
-func UserSubscriptionsURL() string {
-	return BaseURL + "/v1/user/subscriptions"
+// UserSubscriptionsURL returns one page of the current user's subscriptions.
+// The endpoint is offset-paginated ({data, total, offset, limit}).
+func UserSubscriptionsURL(limit, offset int) string {
+	return fmt.Sprintf("%s/v1/user/subscriptions?limit=%d&offset=%d", BaseURL, limit, offset)
 }
