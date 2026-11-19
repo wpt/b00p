@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/downloader"
@@ -135,7 +136,7 @@ func (e *Engine) parsePostContent(post *boosty.Post) parser.ParsedContent {
 			parsed.SkippedVideos, post.ID)
 	}
 	if len(parsed.UnknownTypes) > 0 {
-		e.c.Log.Printf("  warning: post %s contains unhandled block type(s) %v — that content is not saved (b00p does not support it yet)",
+		e.c.Log.Printf("  warning: post %s contains unhandled block type(s) %v — that content may be missing from Markdown; source fields remain in post.json",
 			post.ID, parsed.UnknownTypes)
 	}
 	return parsed
@@ -210,8 +211,24 @@ func (e *Engine) downloadComments(postID, dir string, expectedCount int) (capped
 	return capped, nil
 }
 
-// writeJSON marshals v with indent and writes it to path (0644) atomically.
+// writeJSON preserves an unchanged API post's source fields; constructed or
+// edited posts retain ordinary typed marshaling. Writes are atomic (0644).
 func writeJSON(path string, v any) error {
+	if post, ok := v.(*boosty.Post); ok && post != nil && len(post.RawJSON) > 0 {
+		// SavePost is also a library API: never overwrite caller edits with
+		// stale source values. Decode without UnmarshalJSON to avoid another
+		// raw snapshot allocation; compare nested typed fields as well.
+		type plainPost boosty.Post
+		var source plainPost
+		if err := json.Unmarshal(post.RawJSON, &source); err != nil {
+			return fmt.Errorf("decode source %s: %w", filepath.Base(path), err)
+		}
+		current := plainPost(*post)
+		current.RawJSON = nil
+		if reflect.DeepEqual(current, source) {
+			v = post.RawJSON
+		}
+	}
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", filepath.Base(path), err)
