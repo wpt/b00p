@@ -111,3 +111,17 @@ func RemoveIfExists(path string) error {
 	}
 	return nil
 }
+
+// ProbeWrite checks that dir accepts a new file of size bytes, durably: it
+// writes, fsyncs and removes a temp file. A full disk or a read-only mount
+// fails here instead of in the write that matters.
+func ProbeWrite(dir string, size int) error {
+	f, err := os.CreateTemp(dir, ".b00p-probe-*")
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(make([]byte, size))
+	serr := f.Sync()
+	cerr := f.Close()
+	return errors.Join(werr, serr, cerr, os.Remove(f.Name()))
+}

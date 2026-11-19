@@ -1428,15 +1428,23 @@ func TestGetJSON_RefreshSaveFailureKeepsRotatedTokens(t *testing.T) {
 // When the fallback file cannot be written either, the error must say the
 // new tokens die with the process instead of pointing at a file.
 func TestGetJSON_RefreshSaveAndFallbackFailure(t *testing.T) {
-	saved := RetryDelays
-	RetryDelays = []time.Duration{time.Millisecond}
-	defer func() { RetryDelays = saved }()
+	saved, savedWindow := RetryDelays, fileutil.LockRetryWindow
+	RetryDelays, fileutil.LockRetryWindow = []time.Duration{time.Millisecond}, 0
+	defer func() { RetryDelays, fileutil.LockRetryWindow = saved, savedWindow }()
 
 	_, hc := newAuthServer(t)
 	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	// The directory is writable (the pre-refresh probe passes), but both
+	// auth.json and auth.json.new are directories, so both saves fail.
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	for _, p := range []string{authPath, authPath + ".new"} {
+		if err := os.MkdirAll(filepath.Join(p, "child"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	c := &Client{
 		Tokens:   tok,
-		AuthPath: filepath.Join(t.TempDir(), "missing-parent", "auth.json"),
+		AuthPath: authPath,
 		HTTP:     hc,
 		Log:      discardLogger{},
 	}
@@ -1712,5 +1720,26 @@ func TestGetJSON_ErrorBodyIsSnippet(t *testing.T) {
 	}
 	if msg := err.Error(); len(msg) > 1024 || strings.Contains(msg, "\n") || !strings.Contains(msg, "<p>blocked</p>") {
 		t.Errorf("error is %d bytes, newline=%v; want a one-line snippet under 1 KB: %.200s", len(msg), strings.Contains(msg, "\n"), msg)
+	}
+}
+
+// A refresh consumes the old token at once, so when nothing can be written
+// next to auth.json (disk full, directory gone or read-only mid-run) the
+// client must not POST the refresh at all.
+func TestGetJSON_NoRefreshWhenAuthDirUnwritable(t *testing.T) {
+	srv, hc := newAuthServer(t)
+	authPath := filepath.Join(t.TempDir(), "gone", "auth.json")
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+
+	err := c.GetJSON(BaseURL+"/v1/x", &map[string]string{})
+	if err == nil || !strings.Contains(err.Error(), "not refreshing tokens") {
+		t.Fatalf("err = %v, want the refresh refused", err)
+	}
+	if n := srv.refreshPosts.Load(); n != 0 {
+		t.Errorf("refresh POSTs = %d, want 0", n)
+	}
+	if tok.RefreshToken != "r1" {
+		t.Errorf("refresh token = %q, want r1 untouched", tok.RefreshToken)
 	}
 }
