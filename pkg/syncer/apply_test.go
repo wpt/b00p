@@ -178,6 +178,27 @@ func TestBuildSyncEntry_MdFailed_PreservesHasMd(t *testing.T) {
 	}
 }
 
+// The archive format advances only when every file it covers was rewritten:
+// a post.md that failed stays in the old format, so the rewrite fires again.
+func TestBuildSyncEntry_ArchiveNeedsEveryRewrite(t *testing.T) {
+	cases := []struct {
+		name string
+		old  state.PostEntry
+		out  applyOutcome
+		want int
+	}{
+		{"post.json, no md tracked", state.PostEntry{}, applyOutcome{PostJSONWritten: true}, archiveFormat},
+		{"post.json and md", state.PostEntry{HasMd: true}, applyOutcome{PostJSONWritten: true, MDWritten: true}, archiveFormat},
+		{"md failed", state.PostEntry{HasMd: true}, applyOutcome{PostJSONWritten: true}, 0},
+		{"post.json not written", state.PostEntry{}, applyOutcome{MDWritten: true}, 0},
+	}
+	for _, tc := range cases {
+		if got := buildSyncEntry(tc.old, &boosty.Post{}, "dir", false, tc.out).Archive; got != tc.want {
+			t.Errorf("%s: Archive = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestBuildSyncEntry_TierClearedWhenSubLevelNil(t *testing.T) {
 	old := state.PostEntry{Tier: "premium"}
 	full := &boosty.Post{SubscriptionLevel: nil}
@@ -356,11 +377,12 @@ func TestDecideApplyActions_NeedFetch(t *testing.T) {
 		want    bool
 	}{
 		{"empty", applyActions{}, false},
-		{"post", applyActions{Post: true}, true},
+		{"post", applyActions{Post: true}, false},
 		{"media", applyActions{Media: true}, true},
-		{"md", applyActions{MD: true}, true},
+		{"md", applyActions{MD: true}, false},
 		{"comments only", applyActions{Comments: true}, false},
-		{"comments + post", applyActions{Comments: true, Post: true}, true},
+		{"post + md", applyActions{Post: true, MD: true}, false},
+		{"post + media", applyActions{Post: true, Media: true}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

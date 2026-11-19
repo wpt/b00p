@@ -32,6 +32,7 @@ type syncItem struct {
 	Edited            bool // updatedAt changed
 	NewComments       bool // tracked comments differ from post.Count.Comments
 	BackfillUpdatedAt bool // existing.UpdatedAt was 0; needs persisting
+	Outdated          bool // post.json/post.md written in an older archive format
 
 	// DiskCommentCount is the count of live top-level comments + their inlined
 	// live replies read from comments.json (isDeleted stubs excluded, matching
@@ -51,7 +52,7 @@ type syncItem struct {
 func (s syncItem) IsActionable() bool {
 	return s.IsNew || s.JustUnlocked || s.JustLocked ||
 		s.Edited || s.NewComments ||
-		s.VideoMismatch != "" || s.Missing.Any()
+		s.VideoMismatch != "" || s.Missing.Any() || s.Outdated
 }
 
 // Labels returns short status tags for display ordered by severity.
@@ -78,6 +79,9 @@ func (s syncItem) Labels() []string {
 	}
 	if s.Missing.Any() {
 		labels = append(labels, "FILES_MISSING")
+	}
+	if s.Outdated {
+		labels = append(labels, "REWRITE")
 	}
 	return labels
 }
@@ -118,6 +122,9 @@ func (s syncItem) Detail() string {
 	}
 	if m := s.Missing.String(); m != "" {
 		parts = append(parts, "missing "+m)
+	}
+	if s.Outdated {
+		parts = append(parts, "archived by an older b00p")
 	}
 	return strings.Join(parts, "; ")
 }
@@ -174,6 +181,10 @@ func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 		item.Missing.Dir = true
 		return item
 	}
+
+	// post.json and post.md from an older writer lack what the list payload
+	// carries; nothing else would ever rewrite an unedited post.
+	item.Outdated = existing.Archive < archiveFormat
 
 	// State entries written before UpdatedAt was added to the schema have
 	// UpdatedAt == 0; treating that as an edit would flag every such post

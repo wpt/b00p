@@ -100,8 +100,7 @@ output/<blog>/
 ## Notes
 
 - Progress and errors go to stderr: use `2> log.txt` to save them.
-- Deleted a post folder or some media? `b00p download --blog <blog> --sync` downloads them again.
-- Comments are saved for up to about 100 threads per post: Boosty's comments API can't page.
+- Deleted a post folder or some media? `b00p download --blog <blog> --sync` downloads them again.- Comments are saved for up to about 100 threads per post: Boosty's comments API can't page.
 
 ## Library
 

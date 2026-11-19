@@ -41,7 +41,7 @@ func displaySync(log boosty.Logger, items []syncItem) {
 	type counts struct {
 		new, unlocked, locked, lockedNew               int
 		updated, comments, videoMismatch, filesMissing int
-		noChange                                       int
+		outdated, noChange                             int
 	}
 	var k counts
 
@@ -67,6 +67,9 @@ func displaySync(log boosty.Logger, items []syncItem) {
 		}
 		if item.Missing.Any() {
 			k.filesMissing++
+		}
+		if item.Outdated {
+			k.outdated++
 		}
 		// LOCKED_NEW posts already show up in the "locked (no access)" line;
 		// counting them under "no changes" too would make the summary lines
@@ -107,6 +110,9 @@ func displaySync(log boosty.Logger, items []syncItem) {
 	}
 	if k.filesMissing > 0 {
 		log.Printf("  %d files missing on disk", k.filesMissing)
+	}
+	if k.outdated > 0 {
+		log.Printf("  %d archived by an older b00p (post.json/post.md rewritten, nothing downloaded)", k.outdated)
 	}
 	if k.locked > 0 {
 		log.Printf("  %d locked (data preserved)", k.locked)

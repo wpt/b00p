@@ -640,7 +640,8 @@ func TestEngine_Sync_NewPostDoesNotClaimTrackedDir(t *testing.T) {
 	writeFile(t, filepath.Join(blogDir, shared, "image_001.jpg"), "A-image")
 	// No post.json: the FILES_MISSING repair window.
 	writeInitialState(t, blogDir, map[string]state.PostEntry{
-		"aaaaaaaa-old": {Title: "", DirName: shared, UpdatedAt: 100},
+		// Archive current: the tracked post itself must not rewrite post.json.
+		"aaaaaaaa-old": {Title: "", DirName: shared, UpdatedAt: 100, Archive: archiveFormat},
 	})
 
 	f.Media("b.jpg", []byte("B-image"))
