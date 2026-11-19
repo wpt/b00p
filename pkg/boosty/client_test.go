@@ -236,7 +236,7 @@ func TestGetJSON_ReturnsErrorOnHTTPError(t *testing.T) {
 	}
 }
 
-func TestDownloadFile_Success(t *testing.T) {
+func TestDownload_Success(t *testing.T) {
 	content := "hello world file content"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, content)
@@ -253,9 +253,9 @@ func TestDownloadFile_Success(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.txt")
 
-	err := c.DownloadFile(server.URL+"/file", path)
+	err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: path})
 	if err != nil {
-		t.Fatalf("DownloadFile error: %v", err)
+		t.Fatalf("Download error: %v", err)
 	}
 
 	data, _ := os.ReadFile(path)
@@ -264,7 +264,7 @@ func TestDownloadFile_Success(t *testing.T) {
 	}
 }
 
-func TestDownloadFile_SkipsExistingFile(t *testing.T) {
+func TestDownload_SkipsExistingFile(t *testing.T) {
 	var called int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&called, 1)
@@ -283,9 +283,9 @@ func TestDownloadFile_SkipsExistingFile(t *testing.T) {
 	path := filepath.Join(dir, "existing.txt")
 	os.WriteFile(path, []byte("old content"), 0644)
 
-	err := c.DownloadFile(server.URL+"/file", path)
+	err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: path})
 	if err != nil {
-		t.Fatalf("DownloadFile error: %v", err)
+		t.Fatalf("Download error: %v", err)
 	}
 
 	if atomic.LoadInt32(&called) != 0 {
@@ -298,7 +298,7 @@ func TestDownloadFile_SkipsExistingFile(t *testing.T) {
 	}
 }
 
-func TestDownloadFile_RedownloadsZeroByteFile(t *testing.T) {
+func TestDownload_RedownloadsZeroByteFile(t *testing.T) {
 	content := "fresh content"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, content)
@@ -316,9 +316,9 @@ func TestDownloadFile_RedownloadsZeroByteFile(t *testing.T) {
 	path := filepath.Join(dir, "empty.txt")
 	os.WriteFile(path, []byte{}, 0644)
 
-	err := c.DownloadFile(server.URL+"/file", path)
+	err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: path})
 	if err != nil {
-		t.Fatalf("DownloadFile error: %v", err)
+		t.Fatalf("Download error: %v", err)
 	}
 
 	data, _ := os.ReadFile(path)
@@ -1060,7 +1060,7 @@ func TestDownloadOnce_200AfterRangeTruncatesAndRestarts(t *testing.T) {
 // deleted media → 404) must fail fast: the same URL yields the same verdict,
 // so each retry only wastes the backoff schedule (~50s per file at CLI
 // defaults).
-func TestDownloadFile_4xxFailsFastWithoutRetries(t *testing.T) {
+func TestDownload_4xxFailsFastWithoutRetries(t *testing.T) {
 	saved := RetryDelays
 	RetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { RetryDelays = saved }()
@@ -1079,16 +1079,16 @@ func TestDownloadFile_4xxFailsFastWithoutRetries(t *testing.T) {
 		Log:          discardLogger{},
 	}
 
-	err := c.DownloadFile(server.URL+"/file", filepath.Join(t.TempDir(), "v.mp4"))
+	err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: filepath.Join(t.TempDir(), "v.mp4")})
 	if err == nil {
-		t.Fatal("DownloadFile should fail on 403")
+		t.Fatal("Download should fail on 403")
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("HTTP calls = %d, want exactly 1 (4xx is non-retriable)", got)
 	}
 }
 
-func TestDownloadFile_5xxKeepsRetrying(t *testing.T) {
+func TestDownload_5xxKeepsRetrying(t *testing.T) {
 	saved := RetryDelays
 	RetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	defer func() { RetryDelays = saved }()
@@ -1112,8 +1112,8 @@ func TestDownloadFile_5xxKeepsRetrying(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "v.mp4")
-	if err := c.DownloadFile(server.URL+"/file", path); err != nil {
-		t.Fatalf("DownloadFile should recover from transient 5xx: %v", err)
+	if err := c.Download(DownloadRequest{URL: server.URL + "/file", Path: path}); err != nil {
+		t.Fatalf("Download should recover from transient 5xx: %v", err)
 	}
 	data, _ := os.ReadFile(path)
 	if string(data) != content {
