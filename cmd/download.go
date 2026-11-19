@@ -249,15 +249,7 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	}
 
 	if postURL != "" {
-		var post boosty.Post
-		if err := c.GetJSON(boosty.PostURL(urlBlog, urlPostID), &post); err != nil {
-			return fmt.Errorf("fetch post: %w", err)
-		}
-		if post.IsStub() || post.ID != urlPostID {
-			return fmt.Errorf("post %s not accessible (locked, deleted, or subscription lapsed)", urlPostID)
-		}
-		_, _, err := syncer.New(c, buildConfig(urlBlog)).SavePost(&post)
-		return err
+		return downloadURL(c, buildConfig(urlBlog), urlPostID)
 	}
 
 	e := syncer.New(c, buildConfig(blogName))
@@ -265,4 +257,19 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		return e.Sync()
 	}
 	return e.DownloadAll()
+}
+
+// downloadURL fetches one post and saves it into cfg's blog directory. A
+// stub or a different post (a redirect, an API drift) is refused: saving it
+// would write a degraded copy over the archived one.
+func downloadURL(c *boosty.Client, cfg syncer.Config, postID string) error {
+	var post boosty.Post
+	if err := c.GetJSON(boosty.PostURL(cfg.Blog, postID), &post); err != nil {
+		return fmt.Errorf("fetch post: %w", err)
+	}
+	if post.IsStub() || post.ID != postID {
+		return fmt.Errorf("post %s not accessible (locked, deleted, or subscription lapsed)", postID)
+	}
+	_, _, err := syncer.New(c, cfg).SavePost(&post)
+	return err
 }
