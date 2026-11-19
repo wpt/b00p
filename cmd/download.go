@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
+	"github.com/wpt/b00p/pkg/downloader"
 	"github.com/wpt/b00p/pkg/fileutil"
 	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/syncer"
@@ -42,7 +43,7 @@ func init() {
 	downloadCmd.Flags().StringVar(&postURL, "url", "", "single post URL to download")
 	downloadCmd.Flags().BoolVar(&withMD, "md", false, "generate markdown file")
 	downloadCmd.Flags().BoolVar(&withComments, "comments", false, "download comments")
-	downloadCmd.Flags().BoolVar(&downloadExternal, "download-external", false, "download external videos via yt-dlp")
+	downloadCmd.Flags().BoolVar(&downloadExternal, "download-external", false, "download external videos via yt-dlp (needs yt-dlp in PATH; not retried by --sync, rerun with --force)")
 	downloadCmd.Flags().BoolVar(&forceDownload, "force", false, "process every post again, not only new ones; existing media is kept unless the post was edited")
 	downloadCmd.Flags().BoolVar(&syncMode, "sync", false, "sync mode: check for updates, show diff, confirm before applying")
 	downloadCmd.Flags().BoolVar(&checkMedia, "check-media", false, "with --sync: also validate video file sizes via HEAD requests")
@@ -231,6 +232,14 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		// Sole guard between the loose capture ("..") and filepath.Join.
 		if err := validateBlogName(urlBlog); err != nil {
 			return fmt.Errorf("invalid blog %q in --url: %v", urlBlog, err)
+		}
+	}
+
+	// External videos are not tracked in state: a run without a usable
+	// yt-dlp would lose them for good, so it must not start.
+	if downloadExternal {
+		if _, err := downloader.LookYTDLP(); err != nil {
+			return fmt.Errorf("--download-external: %w", err)
 		}
 	}
 
