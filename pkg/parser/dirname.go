@@ -151,17 +151,53 @@ func truncateBytes(s string, n int) string {
 	return s[:n]
 }
 
-// ValidateFormat rejects a --format string that references a placeholder
-// FormatDirName does not implement. Unknown placeholders would otherwise pass
-// through literally ("{tittle}" for every post), and the resulting names are
-// pinned in state on the first run.
+// ValidateFormat rejects a --format string FormatDirName would turn into
+// garbage: an unknown placeholder (passed through literally, "{tittle}" for
+// every post), a {date:FORMAT} that is not y, m and d with separators
+// ("yyyy-mm-dd" prints the year four times), an argument on {title} or {id},
+// or a stray brace. The resulting names are pinned in state on the first run.
 func ValidateFormat(format string) error {
 	for _, m := range placeholderRe.FindAllStringSubmatch(format, -1) {
 		switch m[1] {
-		case "date", "title", "id":
+		case "date":
+			if err := validateDateFormat(m[2]); err != nil {
+				return fmt.Errorf("%s: %w", m[0], err)
+			}
+		case "title", "id":
+			if m[2] != "" {
+				return fmt.Errorf("%s: {%s} takes no format", m[0], m[1])
+			}
 		default:
 			return fmt.Errorf("unknown placeholder %s (supported: {date}, {date:FORMAT}, {title}, {id})", m[0])
 		}
+	}
+	if rest := placeholderRe.ReplaceAllString(format, ""); strings.ContainsAny(rest, "{}") {
+		return fmt.Errorf("unmatched brace in %q", format)
+	}
+	return nil
+}
+
+// validateDateFormat checks a {date:FORMAT} argument: y, m and d at most
+// once each (each prints the whole year, month or day) and separators.
+// A letter or digit other than y, m, d would be copied into every name.
+func validateDateFormat(f string) error {
+	if f == "" {
+		return nil // plain {date}
+	}
+	seen := make(map[rune]bool)
+	for _, r := range f {
+		switch {
+		case r == 'y' || r == 'm' || r == 'd':
+			if seen[r] {
+				return fmt.Errorf("%c appears twice; y, m and d each stand for the whole year, month or day (e.g. {date:d.m.y})", r)
+			}
+			seen[r] = true
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			return fmt.Errorf("%q is not y, m, d or a separator (e.g. {date:d.m.y})", r)
+		}
+	}
+	if len(seen) == 0 {
+		return fmt.Errorf("no y, m or d (e.g. {date:ymd})")
 	}
 	return nil
 }

@@ -48,7 +48,7 @@ func init() {
 	downloadCmd.Flags().BoolVar(&checkMedia, "check-media", false, "with --sync: also validate video file sizes via HEAD requests")
 	downloadCmd.Flags().BoolVar(&checkFilesFlag, "check-files", false, "with --sync: verify post.json, comments.json, post.md exist on disk")
 	downloadCmd.Flags().BoolVar(&autoApply, "yes", false, "with --sync: skip the interactive confirmation and apply changes")
-	downloadCmd.Flags().StringVar(&dirFormat, "format", parser.DefaultFormat, "directory name format: {date}, {date:FORMAT}, {title}, {id}")
+	downloadCmd.Flags().StringVar(&dirFormat, "format", parser.DefaultFormat, "folder name for new posts: {date}, {date:FORMAT} with y, m, d and separators (e.g. {date:d.m.y}), {title}, {id}")
 	downloadCmd.Flags().IntVar(&numWorkers, "workers", 1, "number of concurrent downloads")
 	rootCmd.AddCommand(downloadCmd)
 }
