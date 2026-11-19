@@ -420,3 +420,47 @@ func TestEngine_MissingUpdatedAtIsNoEdit(t *testing.T) {
 		t.Errorf("UpdatedAt = %d, want 100", got)
 	}
 }
+
+// After _state.json is lost, a post whose title changed must reuse its old
+// folder (found by the id in its post.json), not download again into a new
+// one, and keep tracking the post.md and comments.json already there.
+func TestEngine_StateLossReusesArchivedFolder(t *testing.T) {
+	f := newFakeAPI(t)
+	gets := countGETs(f, "a.jpg", "IMG")
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, "myblog")
+	old := filepath.Join(blogDir, "2023-11-14_Old title")
+	mustMkdir(t, old)
+	post := boosty.Post{ID: "p1", Title: "New title", HasAccess: true, UpdatedAt: 100, PublishTime: 1700000000,
+		Data: []boosty.ContentBlock{imageBlock(f, "img-a", "a.jpg")}}
+	writePostJSON(t, old, post)
+	writeFile(t, filepath.Join(old, "image_001.jpg"), "IMG")
+	writeFile(t, filepath.Join(old, "post.md"), "old md")
+	writeFile(t, filepath.Join(old, "comments.json"), `{"data":[]}`)
+	f.PostsList("myblog", post)
+	f.CommentsList("myblog", "p1")
+
+	if err := New(f.client, Config{Blog: "myblog", OutputDir: outDir, AutoApply: true}).DownloadAll(); err != nil {
+		t.Fatalf("DownloadAll: %v\n%s", err, f.log.joined())
+	}
+	entry := mustLoadState(t, blogDir).Posts["p1"]
+	if entry.DirName != "2023-11-14_Old title" || !entry.HasMd || !entry.HasComments {
+		t.Errorf("entry = %+v, want the old folder with post.md and comments.json tracked", entry)
+	}
+	if n := gets.Load(); n != 0 {
+		t.Errorf("image GETs = %d, want 0 (the archived copy is reused)", n)
+	}
+	entries, err := os.ReadDir(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var folders []string
+	for _, d := range entries {
+		if d.IsDir() {
+			folders = append(folders, d.Name())
+		}
+	}
+	if len(folders) != 1 {
+		t.Errorf("post folders = %v, want only the old one", folders)
+	}
+}
