@@ -122,7 +122,11 @@ func (e *Engine) Sync() (err error) {
 	if e.cfg.In != nil {
 		in = e.cfg.In
 	}
-	if !confirmApply(c.Log, bufio.NewReader(in), e.cfg.AutoApply) {
+	ok, err := confirmApply(c.Log, bufio.NewReader(in), e.cfg.AutoApply)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		c.Log.Printf("Cancelled.")
 		return nil
 	}
