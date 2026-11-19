@@ -479,3 +479,43 @@ func TestEngine_HeadlessSyncWithoutYesFails(t *testing.T) {
 		t.Errorf("Sync answered n: err = %v, want nil", err)
 	}
 }
+
+// --url on a post the blog's state tracks must save it the way sync would:
+// a text-only edit fetches no media, the entry advances, and the next sync
+// has nothing to do.
+func TestEngine_SavePostFollowsTrackedEntry(t *testing.T) {
+	f := newFakeAPI(t)
+	gets := countGETs(f, "a.jpg", "IMG-SERVER")
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, "myblog")
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "image_001.jpg"), "IMG-A")
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "t", DirName: "p1_dir", UpdatedAt: 100, HasMd: true, Archive: archiveFormat,
+			Media: map[string]string{"image_001.jpg": "img-a"}},
+	})
+	edited := boosty.Post{ID: "p1", Title: "t", HasAccess: true, UpdatedAt: 200, PublishTime: 1700000000,
+		Data: []boosty.ContentBlock{textBlock("typo fixed"), imageBlock(f, "img-a", "a.jpg")}}
+
+	e := New(f.client, Config{Blog: "myblog", OutputDir: outDir})
+	dirName, _, err := e.SavePost(&edited)
+	if err != nil {
+		t.Fatalf("SavePost: %v\n%s", err, f.log.joined())
+	}
+	if dirName != "p1_dir" || gets.Load() != 0 {
+		t.Errorf("dir %q, %d media GETs; want p1_dir and none (blocks unchanged)", dirName, gets.Load())
+	}
+	if entry := mustLoadState(t, blogDir).Posts["p1"]; entry.UpdatedAt != 200 {
+		t.Errorf("UpdatedAt = %d, want 200", entry.UpdatedAt)
+	}
+	requireFile(t, filepath.Join(postDir, "post.md"))
+
+	f.PostsList("myblog", edited)
+	if err := New(f.client, Config{Blog: "myblog", OutputDir: outDir, AutoApply: true}).Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if log := f.log.joined(); !strings.Contains(log, "Everything up to date.") {
+		t.Errorf("sync after --url is not quiet:\n%s", log)
+	}
+}

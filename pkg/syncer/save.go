@@ -3,6 +3,7 @@ package syncer
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,10 +42,13 @@ const commentsCapThreshold = 100
 // on error — that is what makes the next sync re-attempt the failed pieces
 // instead of silently leaving stale/missing files behind.
 //
-// Existing non-empty media files are skipped unless the post.json already in
-// the directory carries a different updatedAt — the post was edited since
-// that copy was saved, so media at the same slot may have been swapped and
-// every item is re-downloaded over its old copy.
+// A post the blog's state tracks is saved the way a sync saves it: in its
+// folder, with the post.md and comments.json its entry tracks, replacing
+// only the media an edit changed (see the entry's Media record), and its
+// entry is updated, so the next sync neither repeats the work nor misses
+// the edit. An untracked post stays out of state: its existing non-empty
+// media files are skipped unless the post.json already in the directory
+// carries a different updatedAt, and then every item is re-downloaded.
 //
 // SavePost does not refresh signed video URLs on its own — callers that
 // receive posts from the list endpoint must hoist the refresh via
@@ -65,15 +69,21 @@ func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err e
 	defer func() { err = e.withTokenSaveErr(err) }()
 	// savePost writes nothing for an inaccessible post, not even the blog
 	// directory the lock file lives in.
-	if post.HasAccess {
-		unlock, err := e.lockBlog(e.blogDir())
-		if err != nil {
-			return "", false, err
-		}
-		defer unlock()
+	if !post.HasAccess {
+		dirName, out, err := e.savePost(post, "", false, false, state.PostEntry{})
+		return dirName, out.CommentsCapped, err
 	}
-	name := parser.FormatDirName(e.cfg.DirFormat, post.Title, post.PublishTime, post.ID)
-	dirName, out, err := e.savePost(post, name, e.cfg.WithMD, e.cfg.WithComments, state.PostEntry{})
+	_, st, unlock, err := e.loadState()
+	if err != nil {
+		return "", false, err
+	}
+	defer unlock()
+	old, tracked := st.Get(post.ID)
+	dirName, out, err := e.savePost(post, e.pickDirName(old, post),
+		e.cfg.WithMD || old.HasMd, e.cfg.WithComments || old.HasComments, old)
+	if tracked && dirName != "" && !e.commitEntry(st, post.ID, buildSyncEntry(old, post, dirName, true, out)) {
+		err = errors.Join(err, errors.New("state not saved; see log above"))
+	}
 	return dirName, out.CommentsCapped, err
 }
 
