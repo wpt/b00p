@@ -21,7 +21,8 @@ type postJob struct {
 // State is saved per-completed post under a mutex so a mid-run crash leaves
 // a consistent _state.json. The per-blog lock is held for the whole run; if
 // another run has it, DownloadAll fails fast.
-func (e *Engine) DownloadAll() error {
+func (e *Engine) DownloadAll() (err error) {
+	defer func() { err = e.withTokenSaveErr(err) }()
 	c := e.c
 	c.Log.Printf("Fetching all posts from %s...", e.cfg.Blog)
 

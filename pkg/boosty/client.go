@@ -31,7 +31,8 @@ var ErrFetchPage = errors.New("page fetch failed")
 // token as soon as it issues the new pair, so the Client keeps the new pair
 // in memory, writes it to a sibling auth.json.new named in the error, and
 // never refreshes again (a further rotation would turn that file into a dead
-// credential). GetJSON fails fast on it, so the run ends in an error.
+// credential). Only the request that ran the refresh gets this error; callers
+// that own a whole run check Client.TokenSaveErr before reporting success.
 var ErrTokenSaveFailed = errors.New("token refresh succeeded but saving auth file failed")
 
 const (
@@ -300,6 +301,16 @@ func (c *Client) refreshAndSave(staleToken string) error {
 		return c.saveErr
 	}
 	return nil
+}
+
+// TokenSaveErr returns the ErrTokenSaveFailed of a refresh whose rotated
+// pair never reached AuthPath, or nil. Requests holding the old token carry
+// on with the new pair without seeing that error, so a run that ends without
+// checking this can report success while auth.json holds a dead token.
+func (c *Client) TokenSaveErr() error {
+	c.tokensMu.Lock()
+	defer c.tokensMu.Unlock()
+	return c.saveErr
 }
 
 // refreshRejected reports whether the server already rejected the current
