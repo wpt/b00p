@@ -180,6 +180,40 @@ func TestGetJSON_RetryOnNetworkError(t *testing.T) {
 	}
 }
 
+func TestGetJSON_RetriesTransientStatuses(t *testing.T) {
+	saved := RetryDelays
+	RetryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	defer func() { RetryDelays = saved }()
+
+	statuses := []int{http.StatusBadGateway, http.StatusTooManyRequests}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n := int(calls.Add(1)); n <= len(statuses) {
+			w.WriteHeader(statuses[n-1])
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer server.Close()
+
+	c := &Client{
+		Tokens: &Tokens{AccessToken: "t", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()},
+		HTTP:   server.Client(),
+		Log:    discardLogger{},
+	}
+
+	var result map[string]string
+	if err := c.GetJSON(server.URL+"/test", &result); err != nil {
+		t.Fatalf("GetJSON should succeed after 502 and 429: %v", err)
+	}
+	if result["status"] != "ok" {
+		t.Errorf("status = %q, want 'ok'", result["status"])
+	}
+	if got := calls.Load(); got != 3 {
+		t.Errorf("calls = %d, want 3", got)
+	}
+}
+
 func TestGetJSON_ReturnsErrorOnHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
