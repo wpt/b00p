@@ -145,6 +145,9 @@ func ParseBlocks(blocks []boosty.ContentBlock) ParsedContent {
 
 	for _, block := range blocks {
 		if isBlockEnd(block) {
+			if run, _ := inlineRun(block); run != "" {
+				para = append(para, run)
+			}
 			flushPara()
 			continue
 		}
@@ -364,6 +367,9 @@ func itemText(data []boosty.ContentBlock, unknown func(string)) string {
 	var runs []string
 	for _, block := range data {
 		if isBlockEnd(block) {
+			if run, _ := inlineRun(block); run != "" {
+				runs = append(runs, run)
+			}
 			runs = append(runs, "\n")
 			continue
 		}
