@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -260,6 +261,60 @@ func TestDownloadMedia_Replace(t *testing.T) {
 			}
 			if got := read(t, dir, "video_001.mp4"); got != tc.wantVideo {
 				t.Errorf("video = %q, want %q", got, tc.wantVideo)
+			}
+		})
+	}
+}
+
+// The block ID is the resume key: a partial left against the same block
+// must resume through a freshly signed URL. Keyed on the URL instead, every
+// cross-run resume would restart from byte 0.
+func TestDownloadMedia_ResumesByBlockID(t *testing.T) {
+	for _, m := range []parser.MediaItem{
+		{Type: "image", Filename: "image_001.jpg", ID: "img-1"},
+		{Type: "video", Filename: "video_001.mp4", ID: "vid-1"},
+		{Type: "audio", Filename: "audio_001.mp3", ID: "aud-1"},
+		{Type: "file", Filename: "file_001.zip", ID: "file-1"},
+	} {
+		t.Run(m.Type, func(t *testing.T) {
+			var ranges []string
+			var mu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				ranges = append(ranges, r.Header.Get("Range"))
+				mu.Unlock()
+				if r.Header.Get("Range") == "bytes=4-" {
+					w.Header().Set("Content-Range", "bytes 4-7/8")
+					w.WriteHeader(http.StatusPartialContent)
+					fmt.Fprint(w, "tail")
+					return
+				}
+				fmt.Fprint(w, "fullbody")
+			}))
+			defer server.Close()
+			c := newTestClient(server, &recordingLogger{})
+
+			dir := t.TempDir()
+			path := filepath.Join(dir, m.Filename)
+			if err := os.WriteFile(path+".tmp", []byte("head"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path+".tmp.url", []byte(m.ID+"\n8\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			m.URL = server.URL + "/media?sig=fresh"
+
+			if _, err := DownloadMedia(c, []parser.MediaItem{m}, dir, nil); err != nil {
+				t.Fatalf("DownloadMedia: %v", err)
+			}
+			mu.Lock()
+			got := slices.Clone(ranges)
+			mu.Unlock()
+			if !slices.Equal(got, []string{"bytes=4-"}) {
+				t.Errorf("Range headers = %q, want one bytes=4- (resume keyed on the block ID)", got)
+			}
+			if data, err := os.ReadFile(path); string(data) != "headtail" {
+				t.Errorf("%s = %q (%v), want headtail", m.Filename, data, err)
 			}
 		})
 	}
