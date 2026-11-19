@@ -166,6 +166,13 @@ func (e *Engine) saveNewPost(st *state.State, p *boosty.Post) bool {
 	dirName := e.pickDirName(old, post)
 	withMD := e.cfg.WithMD || old.HasMd
 	withComments := e.cfg.WithComments || old.HasComments
+	if !tracked && e.res.archivedDir(e.blogDir(), post.ID) == dirName {
+		// A folder from before a lost _state.json: keep tracking what it
+		// holds, or sync never refreshes those files again.
+		dir := filepath.Join(e.blogDir(), dirName)
+		withMD = withMD || fileExists(filepath.Join(dir, "post.md"))
+		withComments = withComments || fileExists(filepath.Join(dir, "comments.json"))
+	}
 	dirName, out, err := e.savePost(post, dirName, withMD, withComments, old)
 	if err != nil {
 		c.Log.Printf("  error: %s: %v", post.Title, err)
@@ -199,6 +206,8 @@ func (e *Engine) pickDirName(old state.PostEntry, post *boosty.Post) string {
 		if _, err := os.Stat(filepath.Join(e.blogDir(), old.DirName)); err == nil {
 			return old.DirName
 		}
+	} else if dir := e.res.archivedDir(e.blogDir(), post.ID); dir != "" {
+		return dir
 	}
 	return parser.FormatDirName(e.cfg.DirFormat, post.Title, post.PublishTime, post.ID)
 }
@@ -461,4 +470,10 @@ func buildSyncEntry(old state.PostEntry, post *boosty.Post, dirName string,
 		entry.Media = out.Media
 	}
 	return entry
+}
+
+// fileExists reports whether path is an existing regular file.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }

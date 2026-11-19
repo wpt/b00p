@@ -50,6 +50,9 @@ var caseFoldFS = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 type dirReserver struct {
 	mu    sync.Mutex
 	owned map[string]string // key = blogDir + reserverKeySep + name → postID
+	// archived maps a post ID to the untracked folder whose post.json names
+	// it (see archivedDir); nil until the first lookup.
+	archived map[string]string
 }
 
 func newDirReserver() *dirReserver {
@@ -185,6 +188,48 @@ func (r *dirReserver) diskOwnedBy(blogDir, name, postID string) bool {
 		return true
 	}
 	return existing.ID == "" || existing.ID == postID
+}
+
+// archivedDir returns the folder under blogDir whose post.json belongs to
+// postID, among folders no state entry tracks, or "". After _state.json is
+// lost a post's formatted name can differ from its folder (title edited,
+// another --format or time zone); without this lookup the post is
+// downloaded again into a new folder and the old one is orphaned. The first
+// call reads the post.json of every untracked folder, which on a healthy
+// archive is none.
+func (r *dirReserver) archivedDir(blogDir, postID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.archived == nil {
+		r.archived = make(map[string]string)
+		// An unreadable blog dir only loses the lookup; every write into it
+		// fails on its own.
+		entries, err := os.ReadDir(blogDir)
+		if err != nil {
+			return ""
+		}
+		for _, d := range entries {
+			if !d.IsDir() {
+				continue
+			}
+			if _, tracked := r.owned[reservationKey(blogDir, d.Name())]; tracked {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(blogDir, d.Name(), "post.json"))
+			if err != nil {
+				continue
+			}
+			var p struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(data, &p) == nil && p.ID != "" {
+				if _, dup := r.archived[p.ID]; !dup {
+					r.archived[p.ID] = d.Name()
+				}
+			}
+		}
+	}
+	return r.archived[postID]
 }
 
 // isBlogServiceName reports whether name collides with a blog-root file b00p
