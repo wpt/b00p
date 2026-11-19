@@ -559,7 +559,7 @@ func TestClassifyPost_InState_LegacyZeroUpdatedAt_Backfill(t *testing.T) {
 		t.Fatalf("state.Load: %v", err)
 	}
 	mustMkdir(t, filepath.Join(blogDir, "d"))
-	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 0})
+	st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 0, Archive: archiveFormat})
 
 	post := boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 12345}
 	got := classifyPost(post, st, blogDir)
@@ -754,5 +754,26 @@ func TestSyncItem_Detail_LockedPaths(t *testing.T) {
 func TestSyncItem_Detail_Empty(t *testing.T) {
 	if got := (syncItem{}).Detail(); got != "" {
 		t.Errorf("Detail() on empty item = %q, want ''", got)
+	}
+}
+
+// An entry below the current archive format is rewritten once; a current
+// one is not, so an unchanged post stays quiet.
+func TestClassifyPost_InState_Outdated(t *testing.T) {
+	for _, tc := range []struct {
+		archive int
+		want    bool
+	}{{0, true}, {archiveFormat, false}} {
+		blogDir := t.TempDir()
+		st, err := state.Load(blogDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustMkdir(t, filepath.Join(blogDir, "d"))
+		st.Add("post1", state.PostEntry{DirName: "d", UpdatedAt: 100, Archive: tc.archive})
+		got := classifyPost(boosty.Post{ID: "post1", HasAccess: true, UpdatedAt: 100}, st, blogDir)
+		if got.Outdated != tc.want || got.IsActionable() != tc.want {
+			t.Errorf("Archive=%d: Outdated=%v IsActionable=%v, want both %v", tc.archive, got.Outdated, got.IsActionable(), tc.want)
+		}
 	}
 }

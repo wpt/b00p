@@ -24,10 +24,20 @@ type applyActions struct {
 }
 
 // NeedFetch reports whether any action requires a fresh GetJSON for the post.
-// Comments fetching goes through its own endpoint and does not require this.
+// Only media does: the list payload's signed URLs may have expired by the
+// time the apply reaches the post. post.json and post.md are written from
+// the list copy otherwise (an edit always runs media, so it gets the fresh
+// copy), and comments go through their own endpoint.
 func (a applyActions) NeedFetch() bool {
-	return a.Post || a.Media || a.MD
+	return a.Media
 }
+
+// archiveFormat is the format runApplyActions writes post.json and post.md
+// in, recorded per entry (state.PostEntry.Archive). Bump it when a writer
+// change leaves existing archives missing what the list payload carries:
+// classifyPost flags entries below it Outdated and sync rewrites both files
+// once, without a request.
+const archiveFormat = 1
 
 // applyOutcome captures per-artefact success after runApplyActions ran. It
 // is the input to buildSyncEntry's "do not advance retry-controlling fields
@@ -45,6 +55,7 @@ type applyOutcome struct {
 	MDOK       bool
 	CommentsOK bool
 
+	PostJSONWritten bool
 	CommentsWritten bool
 	MDWritten       bool
 	// CommentsCapped reports that the comments fetch (when it happened)
@@ -67,7 +78,8 @@ func (o applyOutcome) allOK() bool {
 // matrix without faking any HTTP client.
 //
 // Triggers, by artefact:
-//   - Post: post was Edited, or post.json went missing on disk.
+//   - Post: post was Edited, post.json went missing on disk, or the entry
+//     is Outdated.
 //   - Media: post was Edited (block list may have changed), check-media
 //     reported a size mismatch needing fresh signed URLs, a media file is
 //     absent or empty (every sync), or check-files found post.json missing.
@@ -75,18 +87,18 @@ func (o applyOutcome) allOK() bool {
 //     applyExisting): files already on disk cost a stat, and the per-post
 //     payload, not the list one, decides what is fetched.
 //   - MD: this run carries WithMD (or the prior entry recorded HasMd) AND
-//     either Edited or post.md is missing from disk.
+//     either Edited, post.md is missing from disk, or the entry is Outdated.
 //   - Comments: count changed (NewComments — only ever set for posts whose
 //     comments are tracked), or comments.json went missing, or the post was
 //     Edited and either the prior entry tracked comments or the current run
 //     carries WithComments.
 func decideApplyActions(item syncItem, cfg Config) applyActions {
 	return applyActions{
-		Post: item.Edited || item.Missing.PostJSON,
+		Post: item.Edited || item.Missing.PostJSON || item.Outdated,
 		Media: item.Edited || item.VideoMismatch != "" ||
 			item.Missing.Media || item.Missing.PostJSON,
 		MD: (cfg.WithMD || item.Existing.HasMd) &&
-			(item.Edited || item.Missing.Markdown),
+			(item.Edited || item.Missing.Markdown || item.Outdated),
 		Comments: item.NewComments ||
 			item.Missing.Comments ||
 			(item.Edited && (item.Existing.HasComments || cfg.WithComments)),
@@ -275,10 +287,8 @@ func (e *Engine) commitEntry(st *state.State, postID string, entry state.PostEnt
 }
 
 // fetchFullPost returns the post to operate on. When NeedFetch is true a
-// fresh GET is performed (Edited/Media/MD changes need the latest payload,
-// including refreshed signed video URLs); otherwise the classified post is
-// used directly — comments-only updates do not need to round-trip the post
-// endpoint. Returns ok=false when the fetch fails or returns a stub (see
+// fresh GET is performed (media needs refreshed signed URLs); otherwise the
+// classified post is used directly. Returns ok=false when the fetch fails or returns a stub (see
 // Post.IsStub) so callers skip the apply with state preserved; the trigger
 // re-fires on the next sync.
 func (e *Engine) fetchFullPost(classified boosty.Post, actions applyActions) (boosty.Post, bool) {
@@ -322,6 +332,7 @@ func (e *Engine) runApplyActions(dir string, post *boosty.Post, media mediaPlan,
 			return out, fmt.Errorf("post.json: %w", err)
 		}
 		out.PostJSONOK = true
+		out.PostJSONWritten = true
 		c.Log.Printf("  saved post.json: %s", post.Title)
 	}
 
@@ -407,6 +418,9 @@ func applyBackfill(st *state.State, items []syncItem) {
 //   - Media follows every media run, failed or not: it names only bytes
 //     that landed, so the retry of a failed edit replaces only what is
 //     still stale.
+//   - Archive advances only when post.json and, for a post that tracks it,
+//     post.md were both written this run; otherwise the Outdated rewrite
+//     fires again.
 //
 // Pure function — no I/O — so the contract is table-testable.
 func buildSyncEntry(old state.PostEntry, post *boosty.Post, dirName string,
@@ -430,6 +444,9 @@ func buildSyncEntry(old state.PostEntry, post *boosty.Post, dirName string,
 	}
 	if out.MDWritten {
 		entry.HasMd = true
+	}
+	if out.PostJSONWritten && (out.MDWritten || !entry.HasMd) {
+		entry.Archive = archiveFormat
 	}
 	if out.Media != nil {
 		entry.Media = out.Media
