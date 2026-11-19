@@ -582,12 +582,21 @@ func TestDownloadOnce_TotalMismatchDropsPair(t *testing.T) {
 // A 206 may end before the object does (some CDNs cap ranges). Its
 // Content-Length matches the short range, so net/http reports a clean EOF and
 // only the Content-Range total shows the file is incomplete; a chunked 206
-// has no Content-Length at all. The prefix must stay as tmp + sidecar, and
-// later attempts resume from the new offset until the object is complete.
+// has no Content-Length at all, and "bytes N-M/*" names no total, so only
+// the sidecar's does. The prefix must stay as tmp + sidecar, and later
+// attempts resume from the new offset until the object is complete.
 func TestDownload_Short206KeepsPrefixAndResumes(t *testing.T) {
 	const object = "0123456789abcdefghij"
-	for _, chunked := range []bool{false, true} {
-		t.Run(fmt.Sprintf("chunked=%v", chunked), func(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		chunked, unknownTotal bool
+	}{
+		{name: "content-length"},
+		{name: "chunked", chunked: true},
+		{name: "unknown total", unknownTotal: true},
+	} {
+		chunked := tc.chunked
+		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
 			var ranges []string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -601,7 +610,11 @@ func TestDownload_Short206KeepsPrefixAndResumes(t *testing.T) {
 					return
 				}
 				end := min(start+4, len(object))
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end-1, len(object)))
+				total := strconv.Itoa(len(object))
+				if tc.unknownTotal {
+					total = "*"
+				}
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%s", start, end-1, total))
 				if !chunked {
 					w.Header().Set("Content-Length", strconv.Itoa(end-start))
 				}
@@ -703,8 +716,18 @@ func TestDownloadOnce_206PastTotalDropsPair(t *testing.T) {
 // tmp and burn the retry schedule re-downloading the whole object into the
 // same failure. The finished tmp must survive with its sidecar, the error
 // must stop the schedule, and the next attempt must rename it without a GET.
-// A non-empty directory at the target fails the rename on every OS.
+// A non-empty directory at the target fails the rename on every OS. A
+// chunked response advertises no size, so the sidecar must learn it from the
+// bytes that landed.
 func TestDownload_FailedRenameKeepsTmpForNextAttempt(t *testing.T) {
+	for _, chunked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("chunked=%v", chunked), func(t *testing.T) {
+			testFailedRenameKeepsTmp(t, chunked)
+		})
+	}
+}
+
+func testFailedRenameKeepsTmp(t *testing.T, chunked bool) {
 	saved, savedWindow := RetryDelays, lockRetryWindow
 	RetryDelays, lockRetryWindow = []time.Duration{time.Millisecond, time.Millisecond}, 0
 	defer func() { RetryDelays, lockRetryWindow = saved, savedWindow }()
@@ -713,6 +736,9 @@ func TestDownload_FailedRenameKeepsTmpForNextAttempt(t *testing.T) {
 	var gets atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gets.Add(1)
+		if chunked {
+			w.(http.Flusher).Flush()
+		}
 		fmt.Fprint(w, object)
 	}))
 	defer server.Close()

@@ -371,6 +371,10 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 		switch {
 		case crTotal > 0:
 			totalSize = crTotal
+		case expectedTotal > 0:
+			// "bytes N-M/*": the range end is not the object's end, and
+			// taking it would commit a short range as the whole file.
+			totalSize = expectedTotal
 		case totalSize > 0:
 			totalSize += resumeFrom
 		}
@@ -447,6 +451,14 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 			return fmt.Errorf("download %s: %d bytes for a %d-byte object; tmp reset", filename, pw.written, totalSize)
 		}
 		return fmt.Errorf("download %s: incomplete, %d of %d bytes", filename, pw.written, totalSize)
+	}
+	if sc.Total == 0 {
+		// No advertised size: record what landed, or a blocked rename leaves
+		// a tmp the next attempt resumes into a 416 and throws away.
+		sc.Total = pw.written
+		if err := os.WriteFile(sidecarPath, sc.encode(), 0644); err != nil {
+			c.Log.Printf("  warning: failed to write resume sidecar %s: %v", sidecarPath, err)
+		}
 	}
 	return c.commitTmp(tmpPath, sidecarPath, path, pw.written)
 }
