@@ -665,3 +665,22 @@ func TestParseBlocks_Header(t *testing.T) {
 		t.Errorf("UnknownTypes = %v, want empty", got.UnknownTypes)
 	}
 }
+
+// A text block can carry its own text and close the paragraph at once
+// (modificator BLOCK_END with content); the text must not be dropped, at the
+// top level or inside a list item.
+func TestParseBlocks_BlockEndWithText(t *testing.T) {
+	end := func(s string) boosty.ContentBlock {
+		return boosty.ContentBlock{Type: "text", Content: `["` + s + `","unstyled",[]]`, Modificator: "BLOCK_END"}
+	}
+	got := ParseBlocks([]boosty.ContentBlock{
+		{Type: "text", Content: `["first ","unstyled",[]]`},
+		end("half"),
+		end("second"),
+		{Type: "list", Style: "ordered", Items: []boosty.ListItem{{Data: []boosty.ContentBlock{end("one")}}}},
+	})
+	want := []string{"first half", "second", "1. one"}
+	if !slices.Equal(got.TextParts, want) {
+		t.Errorf("TextParts = %q, want %q", got.TextParts, want)
+	}
+}
