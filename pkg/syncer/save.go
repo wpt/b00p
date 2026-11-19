@@ -62,6 +62,7 @@ const commentsCapThreshold = 100
 // dirName may be empty (failures before the directory was created) or
 // non-empty (artefact failures after); callers must check err first.
 func (e *Engine) SavePost(post *boosty.Post) (dirName string, capped bool, err error) {
+	defer func() { err = e.withTokenSaveErr(err) }()
 	// savePost writes nothing for an inaccessible post, not even the blog
 	// directory the lock file lives in.
 	if post.HasAccess {

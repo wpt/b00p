@@ -16,7 +16,8 @@ import (
 // the smart-default entrypoint: cheap pagination + state diff, with optional
 // expensive checks via Config.CheckMedia / Config.CheckFiles. It holds the
 // per-blog lock for the whole run and fails fast if another run has it.
-func (e *Engine) Sync() error {
+func (e *Engine) Sync() (err error) {
+	defer func() { err = e.withTokenSaveErr(err) }()
 	c := e.c
 	c.Log.Printf("Syncing %s...", e.cfg.Blog)
 

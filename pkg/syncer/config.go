@@ -177,3 +177,15 @@ func (e *Engine) loadState() (blogDir string, st *state.State, unlock func(), er
 	e.res.seed(blogDir, st.Posts)
 	return blogDir, st, release, nil
 }
+
+// withTokenSaveErr ends a run in boosty.ErrTokenSaveFailed when it rotated
+// tokens it could not save, unless err already carries it. Workers on the
+// old token never see that error, so without this the run reports success,
+// auth.json keeps the dead refresh token, and nothing names auth.json.new.
+func (e *Engine) withTokenSaveErr(err error) error {
+	saveErr := e.c.TokenSaveErr()
+	if saveErr == nil || errors.Is(err, boosty.ErrTokenSaveFailed) {
+		return err
+	}
+	return errors.Join(err, saveErr)
+}
