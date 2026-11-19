@@ -139,3 +139,22 @@ func resetDownloadFlags(t *testing.T) {
 	reset()
 	t.Cleanup(reset)
 }
+
+// --since takes a date and makes no sense for a single post.
+func TestRunDownload_SinceFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--blog", "b", "--since", "2024-13-01"}, "invalid --since"},
+		{[]string{"--url", "https://boosty.to/b/posts/p1", "--since", "2024-01-01"}, "--since"},
+	} {
+		resetDownloadFlags(t)
+		if err := downloadCmd.ParseFlags(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		if err := runDownload(downloadCmd, nil); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%v: runDownload = %v, want %q", tc.args, err, tc.want)
+		}
+	}
+}

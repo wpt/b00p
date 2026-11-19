@@ -36,6 +36,7 @@ func (e *Engine) DownloadAll() (err error) {
 	var jobs []postJob
 	total := 0
 	skippedState := 0
+	skippedOld := 0
 	seen := make(map[string]bool)
 
 	for post, err := range c.FetchPosts(e.cfg.Blog, boosty.DefaultPageLimit) {
@@ -54,6 +55,10 @@ func (e *Engine) DownloadAll() (err error) {
 			continue
 		}
 		total++
+		if e.beforeSince(post, st) {
+			skippedOld++
+			continue
+		}
 
 		if !post.HasAccess {
 			c.Log.Printf("  [%d] skipping (locked): %s", total, post.Title)
@@ -72,7 +77,7 @@ func (e *Engine) DownloadAll() (err error) {
 		// Nothing new, but regenerate the index so a deleted index.md
 		// self-heals on the next plain run.
 		e.writeBlogIndex(blogDir, st)
-		c.Log.Printf("Done. %d total, 0 new, %d already synced.", total, skippedState)
+		c.Log.Printf("Done. %d total, 0 new, %d already synced%s.", total, skippedState, sinceNote(skippedOld))
 		return e.failed.err()
 	}
 
@@ -88,6 +93,14 @@ func (e *Engine) DownloadAll() (err error) {
 
 	e.writeBlogIndex(blogDir, st)
 
-	c.Log.Printf("Done. %d total, %d downloaded, %d already synced, %d failed.", total, downloaded.Load(), skippedState, e.failed.count())
+	c.Log.Printf("Done. %d total, %d downloaded, %d already synced%s, %d failed.", total, downloaded.Load(), skippedState, sinceNote(skippedOld), e.failed.count())
 	return e.failed.err()
+}
+
+// sinceNote reports the posts --since left out, if any.
+func sinceNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d older than --since", n)
 }

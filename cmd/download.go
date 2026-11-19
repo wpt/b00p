@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/downloader"
@@ -22,6 +23,8 @@ var (
 	withMD           bool
 	withComments     bool
 	downloadExternal bool
+	sinceFlag        string
+	since            time.Time // sinceFlag parsed by runDownload
 	forceDownload    bool
 	syncMode         bool
 	checkMedia       bool
@@ -51,6 +54,7 @@ func init() {
 	downloadCmd.Flags().BoolVar(&autoApply, "yes", false, "with --sync: skip the interactive confirmation and apply changes")
 	downloadCmd.Flags().StringVar(&dirFormat, "format", parser.DefaultFormat, "folder name for new posts: {date}, {date:FORMAT} with y, m, d and separators (e.g. {date:d.m.y}), {title}, {id}")
 	downloadCmd.Flags().IntVar(&numWorkers, "workers", 1, "number of concurrent downloads")
+	downloadCmd.Flags().StringVar(&sinceFlag, "since", "", "skip untracked posts published before this date (YYYY-MM-DD, local time)")
 	rootCmd.AddCommand(downloadCmd)
 }
 
@@ -145,6 +149,7 @@ func buildConfig(blog string) syncer.Config {
 		CheckFiles:       checkFilesFlag,
 		AutoApply:        autoApply,
 		Workers:          numWorkers,
+		Since:            since,
 	}
 }
 
@@ -175,6 +180,14 @@ func runDownload(cmd *cobra.Command, args []string) error {
 	if err := parser.ValidateFormat(dirFormat); err != nil {
 		return fmt.Errorf("invalid --format %q: %v", dirFormat, err)
 	}
+	since = time.Time{}
+	if sinceFlag != "" {
+		t, err := time.ParseInLocation("2006-01-02", sinceFlag, time.Local)
+		if err != nil {
+			return fmt.Errorf("invalid --since %q: want YYYY-MM-DD", sinceFlag)
+		}
+		since = t
+	}
 
 	// Flag-combination guards: silently no-op flags train the user to add
 	// them defensively without understanding what they do. Fail loud.
@@ -194,6 +207,9 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		}
 		if forceDownload {
 			bad = append(bad, "--force")
+		}
+		if sinceFlag != "" {
+			bad = append(bad, "--since")
 		}
 		if cmd.Flags().Changed("workers") {
 			bad = append(bad, "--workers")
