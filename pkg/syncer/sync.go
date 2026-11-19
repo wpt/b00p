@@ -47,7 +47,7 @@ func (e *Engine) Sync() (err error) {
 			e.skipMalformed(err)
 			continue
 		}
-		if !e.firstSeen(seen, post) {
+		if !e.firstSeen(seen, post) || e.beforeSince(post, st) {
 			continue
 		}
 		items = append(items, classifyPost(post, st, blogDir))

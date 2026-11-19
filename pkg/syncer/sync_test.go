@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/state"
@@ -543,5 +544,43 @@ func TestEngine_CheckMediaRepairsTruncatedImage(t *testing.T) {
 	}
 	if got := readFileString(t, filepath.Join(postDir, "image_001.jpg")); got != "FULL-IMAGE" || gets.Load() != 1 {
 		t.Errorf("image = %q after %d GETs, want the full image fetched once", got, gets.Load())
+	}
+}
+
+// --since leaves out untracked posts published before it, in both modes; a
+// tracked older post is still processed.
+func TestEngine_SinceSkipsOlderUntrackedPosts(t *testing.T) {
+	cut := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, run := range []string{"sync", "download"} {
+		t.Run(run, func(t *testing.T) {
+			f := newFakeAPI(t)
+			outDir := t.TempDir()
+			blogDir := filepath.Join(outDir, "myblog")
+			newer := boosty.Post{ID: "new", Title: "new", HasAccess: true, UpdatedAt: 1, PublishTime: cut.Unix() + 60}
+			older := boosty.Post{ID: "old", Title: "old", HasAccess: true, UpdatedAt: 1, PublishTime: cut.Unix() - 60}
+			tracked := boosty.Post{ID: "tracked", Title: "tracked", HasAccess: true, UpdatedAt: 2, PublishTime: cut.Unix() - 120}
+			mustMkdir(t, filepath.Join(blogDir, "tracked_dir"))
+			writeInitialState(t, blogDir, map[string]state.PostEntry{
+				"tracked": {Title: "tracked", DirName: "tracked_dir", UpdatedAt: 1, Archive: archiveFormat, Locked: true},
+			})
+			f.PostsList("myblog", newer, older, tracked)
+			cfg := Config{Blog: "myblog", OutputDir: outDir, AutoApply: true, Since: cut}
+			var err error
+			if run == "sync" {
+				err = New(f.client, cfg).Sync()
+			} else {
+				err = New(f.client, cfg).DownloadAll()
+			}
+			if err != nil {
+				t.Fatalf("%s: %v\n%s", run, err, f.log.joined())
+			}
+			st := mustLoadState(t, blogDir)
+			if !st.Has("new") || st.Has("old") {
+				t.Errorf("state has new=%v old=%v, want only the post after --since", st.Has("new"), st.Has("old"))
+			}
+			if st.Posts["tracked"].Locked {
+				t.Error("tracked older post was skipped; --since must not affect tracked posts")
+			}
+		})
 	}
 }

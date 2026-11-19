@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/parser"
@@ -52,8 +53,15 @@ type Config struct {
 	// file's block changed.
 	Force bool
 
-	// CheckMedia runs HEAD-based video size validation as part of Sync.
+	// CheckMedia compares every media file's size with the server (HEAD)
+	// as part of Sync and re-downloads the ones that differ.
 	CheckMedia bool
+
+	// Since, when set, leaves out untracked posts published before it:
+	// DownloadAll does not download them and Sync does not list them as
+	// NEW. Tracked posts are unaffected. For a first download of a blog
+	// whose back catalogue is too big to fetch.
+	Since time.Time
 
 	// CheckFiles verifies post.json/comments.json/post.md exist on disk
 	// (per state flags) as part of Sync. Pure os.Stat — no network.
@@ -174,6 +182,15 @@ func (e *Engine) loadState() (blogDir string, st *state.State, unlock func(), er
 	}
 	e.res.seed(blogDir, st.Posts)
 	return blogDir, st, release, nil
+}
+
+// beforeSince reports whether post is an untracked post older than
+// Config.Since, which the run leaves out.
+func (e *Engine) beforeSince(post boosty.Post, st *state.State) bool {
+	if e.cfg.Since.IsZero() || st.Has(post.ID) {
+		return false
+	}
+	return time.Unix(post.PublishTime, 0).Before(e.cfg.Since)
 }
 
 // withTokenSaveErr ends a run in boosty.ErrTokenSaveFailed when it rotated
