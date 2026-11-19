@@ -41,10 +41,10 @@ var downloadCmd = &cobra.Command{
 func init() {
 	downloadCmd.Flags().StringVar(&blogName, "blog", "", "blog name to download all posts")
 	downloadCmd.Flags().StringVar(&postURL, "url", "", "single post URL to download")
-	downloadCmd.Flags().BoolVar(&withMD, "md", false, "generate markdown file")
-	downloadCmd.Flags().BoolVar(&withComments, "comments", false, "download comments")
+	downloadCmd.Flags().BoolVar(&withMD, "md", false, "write post.md for the posts this run saves (for an existing archive, run once with --force)")
+	downloadCmd.Flags().BoolVar(&withComments, "comments", false, "write comments.json for the posts this run saves (for an existing archive, run once with --force)")
 	downloadCmd.Flags().BoolVar(&downloadExternal, "download-external", false, "download external videos via yt-dlp (needs yt-dlp in PATH; not retried by --sync, rerun with --force)")
-	downloadCmd.Flags().BoolVar(&forceDownload, "force", false, "process every post again, not only new ones; existing media is kept unless the post was edited")
+	downloadCmd.Flags().BoolVar(&forceDownload, "force", false, "process every post again, not only new ones; existing media is kept unless the post was edited (damaged files: --sync --check-media)")
 	downloadCmd.Flags().BoolVar(&syncMode, "sync", false, "sync mode: check for updates, show diff, confirm before applying")
 	downloadCmd.Flags().BoolVar(&checkMedia, "check-media", false, "with --sync: compare every media file's size with the server (HEAD) and re-download the ones that differ")
 	downloadCmd.Flags().BoolVar(&checkFilesFlag, "check-files", false, "with --sync: verify post.json, comments.json, post.md exist on disk")
