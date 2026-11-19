@@ -440,7 +440,7 @@ func TestEngine_ApplyItem_StubPostPreservesDiskAndState(t *testing.T) {
 			if got := reloaded.Posts["p1"].UpdatedAt; got != 100 {
 				t.Errorf("UpdatedAt = %d, want 100 (a stub must never advance state)", got)
 			}
-			if got := e.failedPosts.Load(); got != 1 {
+			if got := e.failed.count(); got != 1 {
 				t.Errorf("failedPosts = %d, want 1 (skipped apply must surface as a failure)", got)
 			}
 		})
@@ -517,7 +517,7 @@ func TestEngine_ApplyItem_UnlockedAllOKClearsLocked(t *testing.T) {
 	if got.DirName != "p1_dir" {
 		t.Errorf("DirName = %q, want 'p1_dir' (surviving on-disk dir must be reused, not orphaned)", got.DirName)
 	}
-	if n := e.failedPosts.Load(); n != 0 {
+	if n := e.failed.count(); n != 0 {
 		t.Errorf("failedPosts = %d, want 0", n)
 	}
 }
@@ -567,7 +567,7 @@ func TestEngine_ApplyItem_UnlockedPartialFailureKeepsLocked(t *testing.T) {
 	}
 	// One failed post = exactly one failedPosts increment, even though both
 	// an artefact channel failed AND state was saved afterwards.
-	if n := e.failedPosts.Load(); n != 1 {
+	if n := e.failed.count(); n != 1 {
 		t.Errorf("failedPosts = %d, want exactly 1 per failed post", n)
 	}
 }
@@ -847,7 +847,7 @@ func TestEngine_ApplyItem_VideoMismatchFailedRedownloadKeepsOldFile(t *testing.T
 	if data, _ := os.ReadFile(filepath.Join(postDir, "video_001.mp4")); string(data) != "old-video-bytes" {
 		t.Errorf("video = %q, want the old bytes kept after a failed re-download", data)
 	}
-	if n := e.failedPosts.Load(); n != 1 {
+	if n := e.failed.count(); n != 1 {
 		t.Errorf("failedPosts = %d, want 1", n)
 	}
 	reloaded, _ := state.Load(blogDir)
@@ -1535,7 +1535,7 @@ func TestEngine_SaveNewPost_FailedMediaReplaceStillReplacesOnRetry(t *testing.T)
 		t.Fatalf("post.json updatedAt = %d, want 200 (written before media)", prev)
 	}
 
-	e.failedPosts.Store(0)
+	e.failed.reset()
 	if !e.saveNewPost(st, &post) {
 		t.Fatalf("second saveNewPost failed\n%s", f.log.joined())
 	}

@@ -16,7 +16,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 
 	"github.com/wpt/b00p/pkg/boosty"
 	"github.com/wpt/b00p/pkg/parser"
@@ -84,17 +83,14 @@ type Config struct {
 // holding the lock only across map and disk-write operations — never
 // across HTTP downloads or file writes.
 //
-// failedPosts counts per-post apply failures during the current Sync /
-// DownloadAll. Workers log their own errors and return; the orchestrator
-// reads this counter at the end and converts a non-zero count into the
-// top-level error so a cron / --sync --yes run exits non-zero on real
-// failures instead of silently reporting success.
+// failed records the posts the current Sync / DownloadAll failed (see
+// failures).
 type Engine struct {
-	c           *boosty.Client
-	cfg         Config
-	res         *dirReserver
-	stMu        sync.Mutex
-	failedPosts atomic.Int64
+	c      *boosty.Client
+	cfg    Config
+	res    *dirReserver
+	stMu   sync.Mutex
+	failed failures
 }
 
 // New returns an Engine ready to operate on cfg.Blog using c. The returned

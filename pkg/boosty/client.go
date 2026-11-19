@@ -403,8 +403,13 @@ func (c *Client) FetchPosts(blog string, limit int) iter.Seq2[Post, error] {
 
 			for _, raw := range resp.Data {
 				var post Post
-				if err := json.Unmarshal(raw, &post); err != nil {
-					if !yield(Post{}, fmt.Errorf("parse post: %w", err)) {
+				err := json.Unmarshal(raw, &post)
+				if err == nil && post.ID == "" {
+					// Every post would share one directory and one state key.
+					err = errors.New("no id")
+				}
+				if err != nil {
+					if !yield(Post{}, fmt.Errorf("parse post %s: %w", describeRaw(raw), err)) {
 						return
 					}
 					continue
@@ -440,4 +445,17 @@ func (c *Client) FetchComments(blog, postID string, limit int) ([]Comment, error
 		return nil, err
 	}
 	return resp.Data, nil
+}
+
+// describeRaw names a listing entry that failed to parse by whatever of its
+// id and title still decode, so the warning says which post was skipped.
+func describeRaw(raw json.RawMessage) string {
+	var p struct {
+		ID    any `json:"id"`
+		Title any `json:"title"`
+	}
+	if json.Unmarshal(raw, &p) != nil {
+		return "(unreadable)"
+	}
+	return fmt.Sprintf("id=%v title=%v", p.ID, p.Title)
 }
