@@ -133,6 +133,8 @@ Content flags (`--md`, `--comments`, `--download-external`, `--format`) combine 
 >
 > Media already on disk is skipped unless the post was edited since, so this is cheap — it re-fetches metadata, not gigabytes.
 
+After upgrading Markdown rendering, regenerate existing articles with `b00p download --blog username --force --md`. An ordinary unchanged sync does not rewrite existing `post.md` files. The regenerated Markdown retains heading levels, ordered/unordered nested lists, and the source order of text and media references; inline bold/italic/code styling is not reconstructed.
+
 ```bash
 # Save markdown and comments alongside post.json
 b00p download --blog username --md --comments

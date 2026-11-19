@@ -127,7 +127,7 @@ func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) string {
 
 // hasOkVideo reports whether any block is a native (ok_video) video.
 func hasOkVideo(blocks []boosty.ContentBlock) bool {
-	return slices.ContainsFunc(blocks, func(b boosty.ContentBlock) bool { return b.Type == "ok_video" })
+	return containsContentBlock(blocks, func(b boosty.ContentBlock) bool { return b.Type == "ok_video" })
 }
 
 // hasSignedMedia reports whether the post carries content whose download
@@ -136,8 +136,21 @@ func hasOkVideo(blocks []boosty.ContentBlock) bool {
 // (post-level signedQuery). Gates MaybeRefreshSignedURLs; checkVideoSizes
 // keeps using hasOkVideo because it validates videos only.
 func hasSignedMedia(blocks []boosty.ContentBlock) bool {
-	return slices.ContainsFunc(blocks, func(b boosty.ContentBlock) bool {
+	return containsContentBlock(blocks, func(b boosty.ContentBlock) bool {
 		return b.Type == "ok_video" || b.Type == "audio_file" || b.Type == "file"
+	})
+}
+
+// Media inside lists needs the same URL refresh and size checks as top-level media.
+func containsContentBlock(blocks []boosty.ContentBlock, match func(boosty.ContentBlock) bool) bool {
+	return slices.ContainsFunc(blocks, func(b boosty.ContentBlock) bool {
+		return match(b) || (b.Type == "list" && containsListBlock(b.Items, match))
+	})
+}
+
+func containsListBlock(items []boosty.ListItem, match func(boosty.ContentBlock) bool) bool {
+	return slices.ContainsFunc(items, func(item boosty.ListItem) bool {
+		return containsContentBlock(item.Data, match) || containsListBlock(item.Items, match)
 	})
 }
 
