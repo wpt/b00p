@@ -43,7 +43,7 @@ func confirmApply(log boosty.Logger, in *bufio.Reader, auto bool) (bool, error) 
 func displaySync(log boosty.Logger, items []syncItem) {
 	type counts struct {
 		new, unlocked, locked, lockedNew               int
-		updated, comments, videoMismatch, filesMissing int
+		updated, comments, sizeMismatch, filesMissing int
 		outdated, noChange                             int
 	}
 	var k counts
@@ -65,8 +65,8 @@ func displaySync(log boosty.Logger, items []syncItem) {
 		if item.NewComments {
 			k.comments++
 		}
-		if item.VideoMismatch != "" {
-			k.videoMismatch++
+		if item.SizeMismatch != "" {
+			k.sizeMismatch++
 		}
 		if item.Missing.Any() {
 			k.filesMissing++
@@ -108,8 +108,8 @@ func displaySync(log boosty.Logger, items []syncItem) {
 	if k.comments > 0 {
 		log.Printf("  %d comments updated", k.comments)
 	}
-	if k.videoMismatch > 0 {
-		log.Printf("  %d video size mismatches", k.videoMismatch)
+	if k.sizeMismatch > 0 {
+		log.Printf("  %d media size mismatches", k.sizeMismatch)
 	}
 	if k.filesMissing > 0 {
 		log.Printf("  %d files missing on disk", k.filesMissing)

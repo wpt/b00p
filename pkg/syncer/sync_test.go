@@ -519,3 +519,29 @@ func TestEngine_SavePostFollowsTrackedEntry(t *testing.T) {
 		t.Errorf("sync after --url is not quiet:\n%s", log)
 	}
 }
+
+// A truncated but non-empty image is invisible to the per-sync stat; the
+// --check-media size compare must find it and the apply must replace it.
+func TestEngine_CheckMediaRepairsTruncatedImage(t *testing.T) {
+	f := newFakeAPI(t)
+	gets := countGETs(f, "a.jpg", "FULL-IMAGE")
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, "myblog")
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "image_001.jpg"), "FULL")
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "t", DirName: "p1_dir", UpdatedAt: 100, Archive: archiveFormat, Media: map[string]string{"image_001.jpg": "img-a"}},
+	})
+	post := boosty.Post{ID: "p1", Title: "t", HasAccess: true, UpdatedAt: 100, PublishTime: 1700000000,
+		Data: []boosty.ContentBlock{imageBlock(f, "img-a", "a.jpg")}}
+	f.PostsList("myblog", post)
+	f.SinglePost("myblog", "p1", post)
+
+	if err := New(f.client, Config{Blog: "myblog", OutputDir: outDir, AutoApply: true, CheckMedia: true}).Sync(); err != nil {
+		t.Fatalf("Sync: %v\n%s", err, f.log.joined())
+	}
+	if got := readFileString(t, filepath.Join(postDir, "image_001.jpg")); got != "FULL-IMAGE" || gets.Load() != 1 {
+		t.Errorf("image = %q after %d GETs, want the full image fetched once", got, gets.Load())
+	}
+}

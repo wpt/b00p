@@ -109,7 +109,7 @@ func TestBuildSyncEntry_EditedCommentsFailed_PreservesUpdatedAt(t *testing.T) {
 	}
 }
 
-// Pure NewComments / VideoMismatch / Missing.* paths must not advance
+// Pure NewComments / SizeMismatch / Missing.* paths must not advance
 // UpdatedAt — those triggers do not change the remote UpdatedAt and
 // caching the new value here would suppress a later real edit.
 func TestBuildSyncEntry_NotEdited_DoesNotBumpUpdatedAt(t *testing.T) {
@@ -299,16 +299,16 @@ func TestDecideApplyActions_NewCommentsOnly(t *testing.T) {
 	}
 }
 
-func TestDecideApplyActions_VideoMismatchOnly_TriggersMediaOnly(t *testing.T) {
+func TestDecideApplyActions_SizeMismatchOnly_TriggersMediaOnly(t *testing.T) {
 	got := decideApplyActions(
-		syncItem{VideoMismatch: "v.mp4: local 100 vs remote 200"},
+		syncItem{SizeMismatch: "v.mp4: local 100 vs remote 200"},
 		Config{},
 	)
 	if !got.Media {
-		t.Error("VideoMismatch → Media = false, want true")
+		t.Error("SizeMismatch → Media = false, want true")
 	}
 	if got.Post || got.MD || got.Comments {
-		t.Errorf("VideoMismatch alone → Post=%v MD=%v Comments=%v, want all false",
+		t.Errorf("SizeMismatch alone → Post=%v MD=%v Comments=%v, want all false",
 			got.Post, got.MD, got.Comments)
 	}
 }

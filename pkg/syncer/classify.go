@@ -42,8 +42,8 @@ type syncItem struct {
 	// post.Count.Comments.
 	DiskCommentCount int
 
-	VideoMismatch    string       // detail string (empty = no mismatch)
-	MismatchedVideos []string     // filenames behind VideoMismatch; the apply replaces only these
+	SizeMismatch    string       // detail string (empty = no mismatch)
+	MismatchedMedia []string     // filenames behind SizeMismatch; the apply replaces only these
 	Missing          missingFiles // file existence check result
 }
 
@@ -52,7 +52,7 @@ type syncItem struct {
 func (s syncItem) IsActionable() bool {
 	return s.IsNew || s.JustUnlocked || s.JustLocked ||
 		s.Edited || s.NewComments ||
-		s.VideoMismatch != "" || s.Missing.Any() || s.Outdated
+		s.SizeMismatch != "" || s.Missing.Any() || s.Outdated
 }
 
 // Labels returns short status tags for display ordered by severity.
@@ -74,8 +74,8 @@ func (s syncItem) Labels() []string {
 	if s.NewComments {
 		labels = append(labels, "COMMENTS")
 	}
-	if s.VideoMismatch != "" {
-		labels = append(labels, "VIDEO_MISMATCH")
+	if s.SizeMismatch != "" {
+		labels = append(labels, "SIZE_MISMATCH")
 	}
 	if s.Missing.Any() {
 		labels = append(labels, "FILES_MISSING")
@@ -117,8 +117,8 @@ func (s syncItem) Detail() string {
 				s.DiskCommentCount, s.Post.Count.Comments))
 		}
 	}
-	if s.VideoMismatch != "" {
-		parts = append(parts, s.VideoMismatch)
+	if s.SizeMismatch != "" {
+		parts = append(parts, s.SizeMismatch)
 	}
 	if m := s.Missing.String(); m != "" {
 		parts = append(parts, "missing "+m)

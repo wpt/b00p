@@ -34,8 +34,8 @@ func (r *recordingLogger) joined() string {
 	return strings.Join(r.lines, "\n")
 }
 
-// fakeVideoServer serves HEAD responses per the test table.
-func fakeVideoServer(t *testing.T, wantUA string, status int, contentLength int64) *httptest.Server {
+// fakeHeadServer serves HEAD responses per the test table.
+func fakeHeadServer(t *testing.T, wantUA string, status int, contentLength int64) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodHead {

@@ -635,7 +635,7 @@ func TestSyncItem_IsActionable(t *testing.T) {
 		{"locked", syncItem{JustLocked: true}, true},
 		{"edited", syncItem{Edited: true}, true},
 		{"new comments", syncItem{NewComments: true}, true},
-		{"video mismatch", syncItem{VideoMismatch: "x"}, true},
+		{"video mismatch", syncItem{SizeMismatch: "x"}, true},
 		{"missing files", syncItem{Missing: missingFiles{PostJSON: true}}, true},
 		// IsLockedNew is NOT actionable on its own — apply skips it (no access
 		// to download anything).
@@ -662,17 +662,17 @@ func TestSyncItem_Labels(t *testing.T) {
 		{"unlocked", syncItem{JustUnlocked: true}, []string{"UNLOCKED"}},
 		{"edited only", syncItem{Edited: true}, []string{"UPDATED"}},
 		{"comments", syncItem{NewComments: true}, []string{"COMMENTS"}},
-		{"video mismatch", syncItem{VideoMismatch: "x"}, []string{"VIDEO_MISMATCH"}},
+		{"video mismatch", syncItem{SizeMismatch: "x"}, []string{"SIZE_MISMATCH"}},
 		{"missing", syncItem{Missing: missingFiles{Comments: true}}, []string{"FILES_MISSING"}},
 		{
 			"edited + comments + video + missing",
 			syncItem{
 				Edited:        true,
 				NewComments:   true,
-				VideoMismatch: "x",
+				SizeMismatch: "x",
 				Missing:       missingFiles{PostJSON: true},
 			},
-			[]string{"UPDATED", "COMMENTS", "VIDEO_MISMATCH", "FILES_MISSING"},
+			[]string{"UPDATED", "COMMENTS", "SIZE_MISMATCH", "FILES_MISSING"},
 		},
 		// The lifecycle quartet (NEW/LOCKED_NEW/LOCKED/UNLOCKED) is exclusive
 		// — only the first match wins, but other flags still attach.
@@ -728,7 +728,7 @@ func TestSyncItem_Detail_CommentsFileMissingNamesTheReason(t *testing.T) {
 func TestSyncItem_Detail_MultipleParts(t *testing.T) {
 	item := syncItem{
 		Edited:        true,
-		VideoMismatch: "v.mp4: local 100 vs remote 200",
+		SizeMismatch: "v.mp4: local 100 vs remote 200",
 		Missing:       missingFiles{PostJSON: true, Comments: true},
 	}
 	got := item.Detail()

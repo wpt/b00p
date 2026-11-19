@@ -95,7 +95,7 @@ func (o applyOutcome) allOK() bool {
 func decideApplyActions(item syncItem, cfg Config) applyActions {
 	return applyActions{
 		Post: item.Edited || item.Missing.PostJSON || item.Outdated,
-		Media: item.Edited || item.VideoMismatch != "" ||
+		Media: item.Edited || item.SizeMismatch != "" ||
 			item.Missing.Media || item.Missing.PostJSON,
 		MD: (cfg.WithMD || item.Existing.HasMd) &&
 			(item.Edited || item.Missing.Markdown || item.Outdated),
@@ -112,7 +112,7 @@ func decideApplyActions(item syncItem, cfg Config) applyActions {
 // IsNew, JustUnlocked and Missing.Dir posts go through the first-download
 // flow (saveNewPost merges the prior entry, so tracked post.md and
 // comments.json come back too). JustLocked only flips Locked=true. The
-// actionable-update branch (Edited / NewComments / VideoMismatch /
+// actionable-update branch (Edited / NewComments / SizeMismatch /
 // Missing.*) requires InState=true, which its three producers guarantee:
 // classifyPost, runCheckMedia, and Sync's --check-files block.
 // BackfillUpdatedAt-only items fall to the default no-op — applyBackfill
@@ -215,7 +215,7 @@ func (e *Engine) pickDirName(old state.PostEntry, post *boosty.Post) string {
 // applyExisting re-produces the artefacts an actionable update needs
 // (decideApplyActions). An Edited item replaces the media files whose block
 // changed (newMediaPlan) and lets buildSyncEntry advance UpdatedAt when every
-// channel lands; a VideoMismatch item replaces the mismatched videos; any other
+// channel lands; a SizeMismatch item replaces the mismatched videos; any other
 // media trigger (Missing.*) replaces nothing and fetches only absent or empty
 // files.
 //
@@ -260,7 +260,7 @@ func (e *Engine) applyExisting(st *state.State, item syncItem) {
 	// The fetch may be newer than the listing that classified the item: an
 	// edit between the two must still replace the swapped blocks.
 	edited := item.Edited || (old.UpdatedAt != 0 && fullPost.UpdatedAt != 0 && fullPost.UpdatedAt != old.UpdatedAt)
-	media := newMediaPlan(dir, old, fullPost.UpdatedAt, edited, item.MismatchedVideos)
+	media := newMediaPlan(dir, old, fullPost.UpdatedAt, edited, item.MismatchedMedia)
 	out, err := e.runApplyActions(dir, &fullPost, media, actions)
 	if err != nil {
 		// Logged here, not inside runApplyActions, so a post fails once in
@@ -422,7 +422,7 @@ func applyBackfill(st *state.State, items []syncItem) {
 //   - UpdatedAt only advances when this run actually caught up with an
 //     Edited post — meaning ALL four artefact channels (post.json, media,
 //     post.md, comments) either were not required this run or completed
-//     successfully. Other triggers (NewComments / VideoMismatch / Missing.*)
+//     successfully. Other triggers (NewComments / SizeMismatch / Missing.*)
 //     do not change the remote UpdatedAt, so the cached copy must not
 //     advance off the back of them either.
 //   - Locked clears only on the same all-channels-landed condition, so a
