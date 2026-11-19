@@ -202,7 +202,7 @@ func checkRemoteVideoSize(httpc *http.Client, ua string, log boosty.Logger,
 
 	req, err := http.NewRequest("HEAD", url, nil)
 	if err != nil {
-		log.Printf("  check-media %s: build request: %v", filename, err)
+		log.Printf("  check-media %s: build request: %v", filename, boosty.RedactURLError(err))
 		return ""
 	}
 	req.Header.Set("User-Agent", ua)
