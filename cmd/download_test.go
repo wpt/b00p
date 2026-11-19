@@ -330,3 +330,19 @@ func TestNewClient_AdoptsNewerAuthFileNew(t *testing.T) {
 		})
 	}
 }
+
+// External videos are not tracked in state, so a --download-external run
+// without a usable yt-dlp must stop before it starts, not lose them with
+// exit 0. The auth file is never reached.
+func TestRunDownload_DownloadExternalNeedsYTDLP(t *testing.T) {
+	oldURL, oldBlog, oldExt, oldAuth := postURL, blogName, downloadExternal, authPath
+	t.Cleanup(func() { postURL, blogName, downloadExternal, authPath = oldURL, oldBlog, oldExt, oldAuth })
+	postURL, blogName, downloadExternal = "", "someblog", true
+	authPath = filepath.Join(t.TempDir(), "missing-auth.json")
+	t.Setenv("PATH", t.TempDir())
+
+	err := runDownload(downloadCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "yt-dlp not found") {
+		t.Fatalf("runDownload = %v, want the missing yt-dlp named before any API call", err)
+	}
+}

@@ -34,6 +34,24 @@ const ytdlpTimeout = 20 * time.Minute
 // the same video again under a new number after an edit shifted the slots.
 const externalTemplate = "external_%(extractor_key)s_%(id)s.%(ext)s"
 
+// LookYTDLP returns the yt-dlp executable DownloadExternal runs, or why it
+// cannot run one. Callers check it before a run: external videos are not
+// tracked in state, so a run that finds no yt-dlp loses them for good.
+func LookYTDLP() (string, error) {
+	ytdlp, err := exec.LookPath("yt-dlp")
+	if err != nil {
+		return "", fmt.Errorf("yt-dlp not found (%w). Install it: pip install yt-dlp", err)
+	}
+	// Windows runs .bat/.cmd through cmd.exe, and Go's argument quoting leaves
+	// `&`, `|` and `>` bare, so a post URL like `...?v=x&calc` would run calc.
+	if runtime.GOOS == "windows" {
+		if ext := filepath.Ext(ytdlp); strings.EqualFold(ext, ".bat") || strings.EqualFold(ext, ".cmd") {
+			return "", fmt.Errorf("yt-dlp resolves to a batch wrapper (%s), which would let cmd.exe run commands hidden in post URLs. Install yt-dlp.exe (pip install yt-dlp ships one) and put it first in PATH", ytdlp)
+		}
+	}
+	return ytdlp, nil
+}
+
 // DownloadExternal downloads external videos (YouTube, VK, etc.) using yt-dlp.
 // Failures for individual videos are logged but do not abort the loop; the
 // combined error (or nil) is returned so the caller can surface them.
@@ -48,16 +66,9 @@ func DownloadExternal(log boosty.Logger, media []parser.MediaItem, dir string) e
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 
-	ytdlp, err := exec.LookPath("yt-dlp")
+	ytdlp, err := LookYTDLP()
 	if err != nil {
-		return fmt.Errorf("yt-dlp not found in PATH. Install it: pip install yt-dlp")
-	}
-	// Windows runs .bat/.cmd through cmd.exe, and Go's argument quoting leaves
-	// `&`, `|` and `>` bare, so a post URL like `...?v=x&calc` would run calc.
-	if runtime.GOOS == "windows" {
-		if ext := filepath.Ext(ytdlp); strings.EqualFold(ext, ".bat") || strings.EqualFold(ext, ".cmd") {
-			return fmt.Errorf("yt-dlp resolves to a batch wrapper (%s), which would let cmd.exe run commands hidden in post URLs. Install yt-dlp.exe (pip install yt-dlp ships one) and put it first in PATH", ytdlp)
-		}
+		return err
 	}
 
 	var errs []error
