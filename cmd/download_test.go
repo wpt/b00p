@@ -346,3 +346,14 @@ func TestRunDownload_DownloadExternalNeedsYTDLP(t *testing.T) {
 		t.Fatalf("runDownload = %v, want the missing yt-dlp named before any API call", err)
 	}
 }
+
+// A release build prints the version goreleaser stamped; a dev build falls
+// back without inventing one.
+func TestResolveVersion(t *testing.T) {
+	if got := resolveVersion("1.2.3"); got != "1.2.3" {
+		t.Errorf("resolveVersion(1.2.3) = %q", got)
+	}
+	if got := resolveVersion("dev"); got == "" {
+		t.Error("resolveVersion(dev) is empty")
+	}
+}
