@@ -168,8 +168,8 @@ func (e *Engine) saveNewPost(st *state.State, p *boosty.Post) bool {
 	withComments := e.cfg.WithComments || old.HasComments
 	dirName, out, err := e.savePost(post, dirName, withMD, withComments, old)
 	if err != nil {
-		c.Log.Printf("  error: %v", err)
-		e.failedPosts.Add(1)
+		c.Log.Printf("  error: %s: %v", post.Title, err)
+		e.failed.add(post.Title, post.ID)
 		if tracked && dirName != "" {
 			e.commitEntry(st, post.ID, buildSyncEntry(old, post, dirName, true, out))
 		}
@@ -180,12 +180,12 @@ func (e *Engine) saveNewPost(st *state.State, p *boosty.Post) bool {
 	// recording it would aim every later read and write at the blog root.
 	if dirName == "" {
 		c.Log.Printf("  warning: savePost returned empty dirName for accessible post %q; state not updated", post.ID)
-		e.failedPosts.Add(1)
+		e.failed.add(post.Title, post.ID)
 		return false
 	}
 	entry := buildSyncEntry(old, post, dirName, true, out)
 	if !e.commitEntry(st, post.ID, entry) {
-		e.failedPosts.Add(1)
+		e.failed.add(post.Title, post.ID)
 	}
 	return true
 }
@@ -216,13 +216,13 @@ func (e *Engine) pickDirName(old state.PostEntry, post *boosty.Post) string {
 func (e *Engine) applyExisting(st *state.State, item syncItem) {
 	c := e.c
 
-	// failedPosts counts per-POST failures. Several branches below can fail
+	// failed records per-POST failures. Several branches below can fail
 	// for the same post (an artefact channel and then st.Save on the same
 	// full disk), so the increment is funneled through one deferred check.
 	failed := false
 	defer func() {
 		if failed {
-			e.failedPosts.Add(1)
+			e.failed.add(item.Post.Title, item.Post.ID)
 		}
 	}()
 
@@ -236,7 +236,7 @@ func (e *Engine) applyExisting(st *state.State, item syncItem) {
 	// A user who removed the post directory between syncs would otherwise
 	// have every atomic write ENOENT on the missing parent, every run.
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		c.Log.Printf("  error: %v", err)
+		c.Log.Printf("  error: %s: %v", item.Post.Title, err)
 		failed = true
 		return
 	}
@@ -256,7 +256,7 @@ func (e *Engine) applyExisting(st *state.State, item syncItem) {
 	if err != nil {
 		// Logged here, not inside runApplyActions, so a post fails once in
 		// the log; state below still records whatever did land.
-		c.Log.Printf("  error: %v", err)
+		c.Log.Printf("  error: %s: %v", item.Post.Title, err)
 		failed = true
 	}
 	if !e.commitEntry(st, item.Post.ID, buildSyncEntry(old, &fullPost, dirName, item.Edited, out)) {
@@ -272,7 +272,7 @@ func (e *Engine) applyJustLocked(st *state.State, item syncItem) {
 	e.stMu.Unlock()
 	entry.Locked = true
 	if !e.commitEntry(st, item.Post.ID, entry) {
-		e.failedPosts.Add(1)
+		e.failed.add(item.Post.Title, item.Post.ID)
 	}
 }
 
@@ -300,7 +300,7 @@ func (e *Engine) fetchFullPost(classified boosty.Post, actions applyActions) (bo
 	}
 	var p boosty.Post
 	if err := e.c.GetJSON(boosty.PostURL(e.cfg.Blog, classified.ID), &p); err != nil {
-		e.c.Log.Printf("  error fetching post: %v", err)
+		e.c.Log.Printf("  error fetching post %s: %v", classified.Title, err)
 		return boosty.Post{}, false
 	}
 	if p.IsStub() {

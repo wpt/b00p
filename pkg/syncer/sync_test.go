@@ -274,3 +274,56 @@ func TestEngine_DownloadAll_UsesRefreshedSignedURL(t *testing.T) {
 		t.Errorf("post.json does not carry the refreshed URL:\n%s", pj)
 	}
 }
+
+// A listing entry that does not parse (schema drift) or carries no id must
+// fail the run and be named, never be skipped with exit 0; a post listed
+// twice is processed once; and the run's error names the posts that failed.
+func TestEngine_ListingDriftFailsRunAndNamesPosts(t *testing.T) {
+	for _, run := range []string{"sync", "download"} {
+		t.Run(run, func(t *testing.T) {
+			f := newFakeAPI(t)
+			gets := countGETs(f, "a.jpg", "IMG")
+			good := boosty.Post{ID: "p1", Title: "Good", HasAccess: true, PublishTime: 1700000000, UpdatedAt: 100,
+				Data: []boosty.ContentBlock{imageBlock(f, "img-a", "a.jpg")}}
+			bad := boosty.Post{ID: "p2", Title: "Broken media", HasAccess: true, PublishTime: 1700000001, UpdatedAt: 100,
+				Data: []boosty.ContentBlock{imageBlock(f, "img-x", "missing.jpg")}}
+			raws := []json.RawMessage{mustJSON(t, good), mustJSON(t, good), mustJSON(t, bad),
+				json.RawMessage(`{"id":42,"title":"Typed wrong","hasAccess":true}`),
+				json.RawMessage(`{"title":"No id","hasAccess":true}`)}
+			f.HandleFunc("GET", "/v1/blog/myblog/post/", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(boosty.PostsResponse{Data: raws, Extra: boosty.PaginationExtra{IsLast: true}})
+			})
+			saved := boosty.RetryDelays
+			boosty.RetryDelays = nil
+			defer func() { boosty.RetryDelays = saved }()
+
+			e := New(f.client, Config{Blog: "myblog", OutputDir: t.TempDir(), AutoApply: true})
+			var err error
+			if run == "sync" {
+				err = e.Sync()
+			} else {
+				err = e.DownloadAll()
+			}
+			if err == nil {
+				t.Fatal("run over a drifted listing returned nil")
+			}
+			for _, want := range []string{`"Broken media" (p2)`, "title=Typed wrong", "title=No id", "3 post(s) failed"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %s", err, want)
+				}
+			}
+			if n := gets.Load(); n != 1 {
+				t.Errorf("image GETs = %d, want 1 (the repeated post is processed once)", n)
+			}
+		})
+	}
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}

@@ -26,6 +26,7 @@ func (e *Engine) Sync() (err error) {
 		return err
 	}
 	defer unlock()
+	e.failed.reset()
 
 	// Phase 1: Fetch and classify.
 	//
@@ -37,12 +38,16 @@ func (e *Engine) Sync() (err error) {
 	//   - any other error: per-post parse failure inside a successful page;
 	//     iterator continues, we log and skip just that item.
 	var items []syncItem
+	seen := make(map[string]bool)
 	for post, err := range c.FetchPosts(e.cfg.Blog, boosty.DefaultPageLimit) {
 		if err != nil {
 			if errors.Is(err, boosty.ErrFetchPage) {
 				return fmt.Errorf("fetch posts: %w", err)
 			}
-			c.Log.Printf("  warning: skipping malformed post: %v", err)
+			e.skipMalformed(err)
+			continue
+		}
+		if !e.firstSeen(seen, post) {
 			continue
 		}
 		items = append(items, classifyPost(post, st, blogDir))
@@ -106,7 +111,7 @@ func (e *Engine) Sync() (err error) {
 		// index.md self-heals without waiting for actual updates.
 		e.writeBlogIndex(blogDir, st)
 		c.Log.Printf("Everything up to date.")
-		return nil
+		return e.failed.err()
 	}
 
 	// Confirm. With AutoApply, skip the prompt entirely so headless runs
@@ -137,7 +142,6 @@ func (e *Engine) Sync() (err error) {
 	// via e.stMu — the lock is never held across HTTP downloads or artefact
 	// writes, so parallelism stays effective.
 	c.Log.Printf("Applying...")
-	e.failedPosts.Store(0)
 	runWorkerPool(e.cfg.Workers, items, func(item syncItem) {
 		e.applyItem(st, item)
 	})
@@ -147,9 +151,9 @@ func (e *Engine) Sync() (err error) {
 	// state yet and show up after the retrying sync).
 	e.writeBlogIndex(blogDir, st)
 
-	if failed := e.failedPosts.Load(); failed > 0 {
+	if failed := e.failed.count(); failed > 0 {
 		c.Log.Printf("Sync finished with %d failed post(s).", failed)
-		return fmt.Errorf("%d post(s) failed; see log above", failed)
+		return e.failed.err()
 	}
 	c.Log.Printf("Sync complete.")
 	return nil

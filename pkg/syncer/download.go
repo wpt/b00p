@@ -31,10 +31,12 @@ func (e *Engine) DownloadAll() (err error) {
 		return err
 	}
 	defer unlock()
+	e.failed.reset()
 
 	var jobs []postJob
 	total := 0
 	skippedState := 0
+	seen := make(map[string]bool)
 
 	for post, err := range c.FetchPosts(e.cfg.Blog, boosty.DefaultPageLimit) {
 		if err != nil {
@@ -45,7 +47,10 @@ func (e *Engine) DownloadAll() (err error) {
 				// anything (auth broken, blog renamed, transport).
 				return fmt.Errorf("fetch posts: %w", err)
 			}
-			c.Log.Printf("  warning: skipping malformed post: %v", err)
+			e.skipMalformed(err)
+			continue
+		}
+		if !e.firstSeen(seen, post) {
 			continue
 		}
 		total++
@@ -68,13 +73,12 @@ func (e *Engine) DownloadAll() (err error) {
 		// self-heals on the next plain run.
 		e.writeBlogIndex(blogDir, st)
 		c.Log.Printf("Done. %d total, 0 new, %d already synced.", total, skippedState)
-		return nil
+		return e.failed.err()
 	}
 
 	c.Log.Printf("Found %d posts to download (workers: %d)", len(jobs), e.cfg.Workers)
 
 	var downloaded atomic.Int64
-	e.failedPosts.Store(0)
 	runWorkerPool(e.cfg.Workers, jobs, func(job postJob) {
 		c.Log.Printf("  [%d] %s", job.num, job.post.Title)
 		if e.saveNewPost(st, &job.post) {
@@ -84,10 +88,6 @@ func (e *Engine) DownloadAll() (err error) {
 
 	e.writeBlogIndex(blogDir, st)
 
-	failed := int(e.failedPosts.Load())
-	c.Log.Printf("Done. %d total, %d downloaded, %d already synced, %d failed.", total, downloaded.Load(), skippedState, failed)
-	if failed > 0 {
-		return fmt.Errorf("%d post(s) failed; see log above", failed)
-	}
-	return nil
+	c.Log.Printf("Done. %d total, %d downloaded, %d already synced, %d failed.", total, downloaded.Load(), skippedState, e.failed.count())
+	return e.failed.err()
 }
