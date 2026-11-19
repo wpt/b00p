@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -279,5 +280,53 @@ func TestRunDownload_ValidatesURLBlog(t *testing.T) {
 	err := runDownload(downloadCmd, nil)
 	if err == nil || !strings.Contains(err.Error(), `invalid blog ".."`) {
 		t.Fatalf("runDownload(--url with traversal blog) = %v, want invalid-blog rejection", err)
+	}
+}
+
+// A run that could not save rotated tokens left the only live pair in
+// auth.json.new; auth.json holds the refresh token the server consumed. The
+// next run must pick the newer pair up instead of failing with "get new
+// tokens", and must leave an older .new alone.
+func TestNewClient_AdoptsNewerAuthFileNew(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		newer   bool
+		wantTok string
+	}{
+		{"newer", true, "r2"},
+		{"older", false, "r1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := useAuthFile(t, `{"accessToken":"a1","refreshToken":"r1","expiresAt":1000}`)
+			expires := 2000
+			if !tc.newer {
+				expires = 500
+			}
+			newPath := path + ".new"
+			if err := os.WriteFile(newPath, []byte(`{"accessToken":"a2","refreshToken":"r2","expiresAt":`+strconv.Itoa(expires)+`}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			c, err := newClient()
+			if err != nil {
+				t.Fatalf("newClient: %v", err)
+			}
+			if c.Tokens.RefreshToken != tc.wantTok {
+				t.Errorf("client refresh token = %q, want %q", c.Tokens.RefreshToken, tc.wantTok)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), `"`+tc.wantTok+`"`) {
+				t.Errorf("auth.json = %s, want refresh token %s", data, tc.wantTok)
+			}
+			_, statErr := os.Stat(newPath)
+			if tc.newer && !os.IsNotExist(statErr) {
+				t.Errorf("auth.json.new still present after it was adopted: %v", statErr)
+			}
+			if !tc.newer && statErr != nil {
+				t.Errorf("older auth.json.new removed: %v", statErr)
+			}
+		})
 	}
 }
