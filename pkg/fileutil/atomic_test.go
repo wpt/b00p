@@ -49,24 +49,42 @@ func TestWriteFileAtomic_Overwrites(t *testing.T) {
 // filesystems and stop being atomic.
 func TestWriteFileAtomic_BareFilename(t *testing.T) {
 	dir := t.TempDir()
-	prevWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd: %v", err)
+	t.Chdir(dir)
+	// A temp file created in os.TempDir would fail here instead of
+	// landing on the same volume and passing unnoticed.
+	missing := filepath.Join(dir, "no-such-tmp")
+	for _, env := range []string{"TMP", "TEMP", "TMPDIR"} {
+		t.Setenv(env, missing)
 	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("Chdir(%s): %v", dir, err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chdir(prevWD); err != nil {
-			t.Logf("restore cwd: %v", err)
-		}
-	})
 
 	if err := WriteFileAtomic("out.json", []byte("data"), 0644); err != nil {
 		t.Fatalf("WriteFileAtomic: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "out.json")); err != nil {
 		t.Fatalf("expected out.json in cwd: %v", err)
+	}
+}
+
+// A failed rename (here: onto a non-empty directory) must not leave the
+// temp file behind; every later write would add another orphan.
+func TestWriteFileAtomic_FailedRenameRemovesTemp(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.json")
+	if err := os.MkdirAll(filepath.Join(dest, "child"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteFileAtomic(dest, []byte("data"), 0644); err == nil {
+		t.Fatal("WriteFileAtomic onto a non-empty directory succeeded")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "out.json" {
+			t.Errorf("leftover %q after failed rename", e.Name())
+		}
 	}
 }
 
