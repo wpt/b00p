@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 // rewriteTransport reroutes every request to the test server regardless of
@@ -762,9 +764,9 @@ func TestDownload_FailedRenameKeepsTmpForNextAttempt(t *testing.T) {
 }
 
 func testFailedRenameKeepsTmp(t *testing.T, chunked bool) {
-	saved, savedWindow := RetryDelays, lockRetryWindow
-	RetryDelays, lockRetryWindow = []time.Duration{time.Millisecond, time.Millisecond}, 0
-	defer func() { RetryDelays, lockRetryWindow = saved, savedWindow }()
+	saved, savedWindow := RetryDelays, fileutil.LockRetryWindow
+	RetryDelays, fileutil.LockRetryWindow = []time.Duration{time.Millisecond, time.Millisecond}, 0
+	defer func() { RetryDelays, fileutil.LockRetryWindow = saved, savedWindow }()
 
 	const object = "complete video bytes"
 	var gets atomic.Int32
@@ -1376,9 +1378,9 @@ func TestGetJSON_ConcurrentRefreshDedup(t *testing.T) {
 // in memory and lands in auth.json.new, the error names that file, and the
 // client never rotates again, so that file stays the valid credential.
 func TestGetJSON_RefreshSaveFailureKeepsRotatedTokens(t *testing.T) {
-	saved, savedWindow := RetryDelays, lockRetryWindow
-	RetryDelays, lockRetryWindow = []time.Duration{time.Millisecond}, 0
-	defer func() { RetryDelays, lockRetryWindow = saved, savedWindow }()
+	saved, savedWindow := RetryDelays, fileutil.LockRetryWindow
+	RetryDelays, fileutil.LockRetryWindow = []time.Duration{time.Millisecond}, 0
+	defer func() { RetryDelays, fileutil.LockRetryWindow = saved, savedWindow }()
 
 	srv, hc := newAuthServer(t)
 	// A directory where auth.json should be: the rename onto it fails on

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wpt/b00p/pkg/boosty"
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 // recordingLogger captures log lines for later inspection. Concurrency-safe
@@ -204,4 +205,13 @@ func (f *fakeAPI) Media(filename string, content []byte) {
 // blocks so DownloadMedia / HEAD lands on this server's handler.
 func (f *fakeAPI) MediaURL(filename string) string {
 	return f.srv.URL + "/_media/" + filename
+}
+
+// noLockRetry makes writes that are meant to fail give up at once instead of
+// waiting out fileutil's Windows lock retry.
+func noLockRetry(t *testing.T) {
+	t.Helper()
+	saved := fileutil.LockRetryWindow
+	fileutil.LockRetryWindow = 0
+	t.Cleanup(func() { fileutil.LockRetryWindow = saved })
 }

@@ -8,9 +8,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
-	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/wpt/b00p/pkg/fileutil"
@@ -73,51 +71,17 @@ func LoadTokens(path string) (*Tokens, error) {
 	return &tokens, nil
 }
 
-// lockRetryWindow bounds how long retryLocked retries a rename that another
-// process's open handle blocks on Windows (auth.json saves, media tmp
-// renames). A package variable so tests can shrink it.
-var lockRetryWindow = 2 * time.Second
-
-// SaveTokens writes tokens to a JSON file atomically (temp + fsync + rename),
-// so an interrupted write cannot truncate an existing auth.json. Permissions
-// are restricted to 0600 since the file holds bearer credentials.
-//
-// On Windows an antivirus, indexer or backup handle on auth.json (or another
-// b00p reading it) makes the rename fail with "Access is denied" or a
-// sharing violation until that handle closes; SaveTokens retries those for up
-// to lockRetryWindow.
+// SaveTokens writes tokens to a JSON file atomically (see
+// fileutil.WriteFileAtomic: temp + fsync + rename, Windows lock retries, a
+// symlinked path keeps its link), so an interrupted write cannot truncate an
+// existing auth.json. Permissions are restricted to 0600 since the file holds
+// bearer credentials.
 func (t *Tokens) SaveTokens(path string) error {
 	data, err := json.MarshalIndent(t, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal tokens: %w", err)
 	}
-	return retryLocked(func() error { return fileutil.WriteFileAtomic(path, data, 0600) })
-}
-
-// retryLocked runs op until it succeeds, fails with anything but a Windows
-// file lock (windowsFileLocked), or lockRetryWindow runs out.
-func retryLocked(op func() error) error {
-	deadline := time.Now().Add(lockRetryWindow)
-	for {
-		err := op()
-		if err == nil || !windowsFileLocked(err) || time.Now().After(deadline) {
-			return err
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// windowsFileLocked reports whether err is ERROR_ACCESS_DENIED or
-// ERROR_SHARING_VIOLATION on Windows. Numeric codes keep this free of build
-// tags: syscall.Errno exists everywhere, but 5 and 32 are EIO and EPIPE on
-// Unix, hence the GOOS guard.
-func windowsFileLocked(err error) bool {
-	var errno syscall.Errno
-	if runtime.GOOS != "windows" || !errors.As(err, &errno) {
-		return false
-	}
-	const errorAccessDenied, errorSharingViolation = 5, 32
-	return errno == errorAccessDenied || errno == errorSharingViolation
+	return fileutil.WriteFileAtomic(path, data, 0600)
 }
 
 // refreshRequest is the POST body sent to /oauth/token/. A typed struct so

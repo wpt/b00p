@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 func TestTokens_IsExpired(t *testing.T) {
@@ -181,10 +183,10 @@ func TestSaveTokens_RetriesWhileFileLockedOnWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	saved := lockRetryWindow
-	lockRetryWindow = 0
+	saved := fileutil.LockRetryWindow
+	fileutil.LockRetryWindow = 0
 	err = (&Tokens{AccessToken: "a2"}).SaveTokens(path)
-	lockRetryWindow = saved
+	fileutil.LockRetryWindow = saved
 	if err == nil {
 		f.Close()
 		t.Fatal("SaveTokens without retries succeeded under an open handle; the test no longer models the lock")
