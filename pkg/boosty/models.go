@@ -195,8 +195,9 @@ type CommentAuthor struct {
 
 // SubscriptionsResponse is the list of user subscriptions.
 type SubscriptionsResponse struct {
-	Data  []Subscription `json:"data"`
-	Total int            `json:"total"`
+	Data   []Subscription `json:"data"`
+	Total  int            `json:"total"`
+	Offset int            `json:"offset"`
 }
 
 // Subscription is a user's subscription to a blog.
@@ -205,7 +206,8 @@ type Subscription struct {
 	Price             float64           `json:"price"`
 	OnTime            int64             `json:"onTime"`
 	OffTime           int64             `json:"offTime"`
-	IsPaused          bool              `json:"isPaused"`
+	IsPaused          bool              `json:"isPause"` // the API's name; isPaused never matches
+	IsSuspended       bool              `json:"isSuspended"`
 	Blog              SubscriptionBlog  `json:"blog"`
 	SubscriptionLevel SubscriptionLevel `json:"subscriptionLevel"`
 }

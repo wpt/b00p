@@ -388,6 +388,34 @@ func (c *Client) saveFallback(saveErr error) error {
 		ErrTokenSaveFailed, saveErr, fallback, c.AuthPath)
 }
 
+// SubscriptionsPageLimit is the page size the Boosty web client uses for
+// /v1/user/subscriptions.
+const SubscriptionsPageLimit = 30
+
+// FetchSubscriptions returns an iterator over every subscription of the
+// current user, page by page. A failed page yields its error and stops. An
+// empty page stops too, so a server that ignores offset cannot loop it.
+func (c *Client) FetchSubscriptions(limit int) iter.Seq2[Subscription, error] {
+	return func(yield func(Subscription, error) bool) {
+		for offset := 0; ; {
+			var resp SubscriptionsResponse
+			if err := c.GetJSON(UserSubscriptionsURL(limit, offset), &resp); err != nil {
+				yield(Subscription{}, err)
+				return
+			}
+			for _, s := range resp.Data {
+				if !yield(s, nil) {
+					return
+				}
+			}
+			offset += len(resp.Data)
+			if len(resp.Data) == 0 || offset >= resp.Total {
+				return
+			}
+		}
+	}
+}
+
 // FetchPosts returns an iterator over all posts in a blog.
 // Handles pagination internally, yields one Post at a time.
 func (c *Client) FetchPosts(blog string, limit int) iter.Seq2[Post, error] {
