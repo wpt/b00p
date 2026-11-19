@@ -373,7 +373,7 @@ func (c *Client) saveFallback(saveErr error) error {
 		return fmt.Errorf("%w: %w; writing %s failed too (%v), so the new tokens are lost when this run ends: get new tokens from browser cookies and update auth.json",
 			ErrTokenSaveFailed, saveErr, fallback, err)
 	}
-	return fmt.Errorf("%w: %w; the new tokens are in %s: rename it to %s before the next run",
+	return fmt.Errorf("%w: %w; the new tokens are in %s, which the next b00p run uses once %s is writable",
 		ErrTokenSaveFailed, saveErr, fallback, c.AuthPath)
 }
 

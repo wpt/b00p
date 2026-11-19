@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
+	"github.com/wpt/b00p/pkg/fileutil"
 	"github.com/wpt/b00p/pkg/parser"
 	"github.com/wpt/b00p/pkg/syncer"
 
@@ -91,9 +94,21 @@ func newClient() (*boosty.Client, error) {
 	if authPath == "" {
 		return nil, fmt.Errorf("--auth cannot be empty")
 	}
+	log := &stdLogger{}
 	tokens, err := boosty.LoadTokens(authPath)
 	if err != nil {
 		return nil, err
+	}
+	// A run whose rotated tokens could not be saved left the only live pair
+	// in auth.json.new (boosty.ErrTokenSaveFailed); auth.json holds the
+	// refresh token the server consumed. A later expiry marks it newer.
+	fallback := authPath + ".new"
+	fromFallback := false
+	if fb, err := boosty.LoadTokens(fallback); err == nil && fb.ExpiresAt > tokens.ExpiresAt {
+		log.Printf("Using the tokens saved in %s.", fallback)
+		tokens, fromFallback = fb, true
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		log.Printf("warning: ignoring %s: %v", fallback, err)
 	}
 	// Boosty invalidates the old refresh token the moment a refresh succeeds,
 	// so a refreshed pair that cannot be saved is a credential at risk.
@@ -103,8 +118,13 @@ func newClient() (*boosty.Client, error) {
 	if err := tokens.SaveTokens(authPath); err != nil {
 		return nil, fmt.Errorf("auth file must be writable (refreshed tokens are saved to it): %w", err)
 	}
+	if fromFallback {
+		if err := fileutil.RemoveIfExists(fallback); err != nil {
+			log.Printf("warning: failed to remove %s: %v", fallback, err)
+		}
+	}
 	c := boosty.NewClient(tokens, authPath)
-	c.Log = &stdLogger{}
+	c.Log = log
 	return c, nil
 }
 
