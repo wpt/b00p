@@ -244,7 +244,7 @@ func runDownload(cmd *cobra.Command, args []string) error {
 		if err := c.GetJSON(boosty.PostURL(urlBlog, urlPostID), &post); err != nil {
 			return fmt.Errorf("fetch post: %w", err)
 		}
-		if post.IsStub() {
+		if post.IsStub() || post.ID != urlPostID {
 			return fmt.Errorf("post %s not accessible (locked, deleted, or subscription lapsed)", urlPostID)
 		}
 		_, _, err := syncer.New(c, buildConfig(urlBlog)).SavePost(&post)

@@ -190,7 +190,9 @@ func classifyPost(post boosty.Post, st *state.State, blogDir string) syncItem {
 	// UpdatedAt == 0; treating that as an edit would flag every such post
 	// as UPDATED on first sync after upgrade. Require a known previous
 	// value before declaring an edit.
-	if existing.UpdatedAt != 0 && post.UpdatedAt != existing.UpdatedAt {
+	// A payload without updatedAt (0) says nothing about an edit: taking it
+	// as one would refetch and rewrite the post on every sync.
+	if existing.UpdatedAt != 0 && post.UpdatedAt != 0 && post.UpdatedAt != existing.UpdatedAt {
 		item.Edited = true
 	}
 	if existing.UpdatedAt == 0 && post.UpdatedAt != 0 {

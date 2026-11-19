@@ -327,3 +327,96 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	}
 	return b
 }
+
+// An accessible post with no blocks in both the listing and the per-post
+// payload is an empty post, not a stub: an edit to it must land instead of
+// failing every sync.
+func TestEngine_EmptyPostEditLands(t *testing.T) {
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, "myblog")
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "post.json"), `{"id":"p1","updatedAt":100,"data":[]}`)
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "t", DirName: "p1_dir", UpdatedAt: 100, Archive: archiveFormat, Media: map[string]string{}},
+	})
+	post := boosty.Post{ID: "p1", Title: "t2", HasAccess: true, UpdatedAt: 200, PublishTime: 1700000000}
+	f.PostsList("myblog", post)
+	f.SinglePost("myblog", "p1", post)
+
+	if err := New(f.client, Config{Blog: "myblog", OutputDir: outDir, AutoApply: true}).Sync(); err != nil {
+		t.Fatalf("Sync: %v\n%s", err, f.log.joined())
+	}
+	if got := mustLoadState(t, blogDir).Posts["p1"].UpdatedAt; got != 200 {
+		t.Errorf("UpdatedAt = %d, want 200", got)
+	}
+}
+
+// A listing that lost its blocks (API drift) must not be archived as the
+// post: a new post is refetched, and a payload without blocks never replaces
+// an archived post.json that has them, even under --force.
+func TestEngine_ListingWithoutBlocks(t *testing.T) {
+	t.Run("new post refetched", func(t *testing.T) {
+		f := newFakeAPI(t)
+		countGETs(f, "a.jpg", "IMG")
+		listed := boosty.Post{ID: "p1", Title: "t", HasAccess: true, UpdatedAt: 100, PublishTime: 1700000000}
+		full := listed
+		full.Data = []boosty.ContentBlock{textBlock("body"), imageBlock(f, "img-a", "a.jpg")}
+		f.PostsList("myblog", listed)
+		f.SinglePost("myblog", "p1", full)
+		outDir := t.TempDir()
+		if err := New(f.client, Config{Blog: "myblog", OutputDir: outDir, AutoApply: true}).DownloadAll(); err != nil {
+			t.Fatalf("DownloadAll: %v", err)
+		}
+		dir := filepath.Join(outDir, "myblog", mustLoadState(t, filepath.Join(outDir, "myblog")).Posts["p1"].DirName)
+		if pj := readFileString(t, filepath.Join(dir, "post.json")); !strings.Contains(pj, "body") {
+			t.Errorf("post.json lacks the refetched blocks: %s", pj)
+		}
+	})
+	t.Run("force keeps archived content", func(t *testing.T) {
+		f := newFakeAPI(t)
+		outDir := t.TempDir()
+		blogDir := filepath.Join(outDir, "myblog")
+		postDir := filepath.Join(blogDir, "p1_dir")
+		mustMkdir(t, postDir)
+		archived := `{"id":"p1","updatedAt":100,"data":[{"type":"text","content":"[\"body\",\"unstyled\",[]]"}]}`
+		writeFile(t, filepath.Join(postDir, "post.json"), archived)
+		writeInitialState(t, blogDir, map[string]state.PostEntry{
+			"p1": {Title: "t", DirName: "p1_dir", UpdatedAt: 100, Archive: archiveFormat},
+		})
+		empty := boosty.Post{ID: "p1", Title: "t", HasAccess: true, UpdatedAt: 100, PublishTime: 1700000000}
+		f.PostsList("myblog", empty)
+		f.SinglePost("myblog", "p1", empty)
+		err := New(f.client, Config{Blog: "myblog", OutputDir: outDir, AutoApply: true, Force: true}).DownloadAll()
+		if err == nil {
+			t.Error("DownloadAll --force over an empty payload returned nil")
+		}
+		if pj := readFileString(t, filepath.Join(postDir, "post.json")); pj != archived {
+			t.Errorf("post.json replaced: %s", pj)
+		}
+	})
+}
+
+// A payload without updatedAt says nothing about an edit: no UPDATED, no
+// refetch, and state keeps its UpdatedAt.
+func TestEngine_MissingUpdatedAtIsNoEdit(t *testing.T) {
+	f := newFakeAPI(t)
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, "myblog")
+	mustMkdir(t, filepath.Join(blogDir, "p1_dir"))
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "t", DirName: "p1_dir", UpdatedAt: 100, Archive: archiveFormat, Media: map[string]string{}},
+	})
+	f.PostsList("myblog", boosty.Post{ID: "p1", Title: "t", HasAccess: true, PublishTime: 1700000000})
+
+	if err := New(f.client, Config{Blog: "myblog", OutputDir: outDir, AutoApply: true}).Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if log := f.log.joined(); !strings.Contains(log, "Everything up to date.") {
+		t.Errorf("sync acted on a payload without updatedAt:\n%s", log)
+	}
+	if got := mustLoadState(t, blogDir).Posts["p1"].UpdatedAt; got != 100 {
+		t.Errorf("UpdatedAt = %d, want 100", got)
+	}
+}
