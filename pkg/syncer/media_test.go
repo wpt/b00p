@@ -89,12 +89,12 @@ func TestNewMediaPlan_PostJSONFallback(t *testing.T) {
 		{"not edited reads nothing", state.PostEntry{UpdatedAt: 100}, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := newMediaPlan(dir, tc.old, tc.edited, nil).landed; !maps.Equal(got, tc.want) || (got == nil) != (tc.want == nil) {
+			if got := newMediaPlan(dir, tc.old, 0, tc.edited, nil).landed; !maps.Equal(got, tc.want) || (got == nil) != (tc.want == nil) {
 				t.Errorf("landed = %v, want %v", got, tc.want)
 			}
 		})
 	}
-	if got := newMediaPlan(t.TempDir(), state.PostEntry{UpdatedAt: 100}, true, nil).landed; got != nil {
+	if got := newMediaPlan(t.TempDir(), state.PostEntry{UpdatedAt: 100}, 0, true, nil).landed; got != nil {
 		t.Errorf("landed without post.json = %v, want nil", got)
 	}
 }
@@ -394,5 +394,94 @@ func TestEngine_Sync_CheckMediaReplacesOnlyMismatchedVideo(t *testing.T) {
 	}
 	if got := readFileString(t, filepath.Join(postDir, "video_002.mp4")); got != "CCCCC" {
 		t.Errorf("video_002 = %q, want re-downloaded", got)
+	}
+}
+
+// The author swaps image 1 between the listing that classified a
+// missing-media repair and the per-post fetch the repair downloads from. The
+// fresh payload is an edit and must replace the swapped block; recording the
+// old bytes under its ID would stop every later sync from fixing them.
+func TestEngine_EditBetweenListingAndFetchReplacesSwappedMedia(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	countGETs(f, "b.jpg", "IMG-B")
+	cGETs := countGETs(f, "c.jpg", "IMG-C")
+
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	postDir := filepath.Join(blogDir, "p1_dir")
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "image_001.jpg"), "IMG-A") // image_002.jpg missing
+	writeInitialState(t, blogDir, map[string]state.PostEntry{
+		"p1": {Title: "t", DirName: "p1_dir", UpdatedAt: 100, Archive: archiveFormat, Media: map[string]string{"image_001.jpg": "img-a"}},
+	})
+	listed := boosty.Post{
+		ID: "p1", Title: "t", HasAccess: true, UpdatedAt: 100, PublishTime: 1700000000,
+		Data: []boosty.ContentBlock{imageBlock(f, "img-a", "a.jpg"), imageBlock(f, "img-b", "b.jpg")},
+	}
+	fetched := listed
+	fetched.UpdatedAt = 200
+	fetched.Data = []boosty.ContentBlock{imageBlock(f, "img-c", "c.jpg"), imageBlock(f, "img-b", "b.jpg")}
+	f.PostsList(blog, listed)
+	f.SinglePost(blog, "p1", fetched)
+
+	if err := New(f.client, Config{Blog: blog, OutputDir: outDir, AutoApply: true}).Sync(); err != nil {
+		t.Fatalf("Sync: %v\n%s", err, f.log.joined())
+	}
+	if got := readFileString(t, filepath.Join(postDir, "image_001.jpg")); got != "IMG-C" || cGETs.Load() != 1 {
+		t.Errorf("image_001 = %q after %d GETs, want IMG-C fetched for the swapped block", got, cGETs.Load())
+	}
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Posts["p1"]; got.UpdatedAt != 100 || got.Media["image_001.jpg"] != "img-c" {
+		t.Errorf("entry = %+v, want UpdatedAt kept at 100 (the listing never saw the edit) and image_001 recorded as img-c", got)
+	}
+}
+
+// A failed edit left post.json at the new updatedAt next to the old image,
+// and then _state.json was lost. The first download keeps the file (nothing
+// says it is stale) but must not record it as the new block, or the next
+// edit, which keeps that block, never replaces it.
+func TestEngine_KeptFileWithoutBaselineIsNotRecorded(t *testing.T) {
+	blog := "myblog"
+	f := newFakeAPI(t)
+	cGETs := countGETs(f, "c.jpg", "IMG-C")
+
+	outDir := t.TempDir()
+	blogDir := filepath.Join(outDir, blog)
+	cfg := Config{Blog: blog, OutputDir: outDir, AutoApply: true}
+	post := boosty.Post{
+		ID: "p1", Title: "t", HasAccess: true, UpdatedAt: 200, PublishTime: 1700000000,
+		Data: []boosty.ContentBlock{textBlock("v2"), imageBlock(f, "img-c", "c.jpg")},
+	}
+	postDir := filepath.Join(blogDir, parser.FormatDirName(parser.DefaultFormat, post.Title, post.PublishTime, post.ID))
+	mustMkdir(t, postDir)
+	writeFile(t, filepath.Join(postDir, "image_001.jpg"), "IMG-A")
+	writePostJSON(t, postDir, post)
+	f.PostsList(blog, post)
+
+	if err := New(f.client, cfg).DownloadAll(); err != nil {
+		t.Fatalf("DownloadAll: %v\n%s", err, f.log.joined())
+	}
+	st, err := state.Load(blogDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := st.Posts["p1"].Media["image_001.jpg"]; ok {
+		t.Fatalf("kept image_001 recorded as %q with no baseline vouching for it\n%s", id, f.log.joined())
+	}
+
+	edited := post
+	edited.UpdatedAt = 300
+	edited.Data = []boosty.ContentBlock{textBlock("v3"), imageBlock(f, "img-c", "c.jpg")}
+	f.PostsList(blog, edited)
+	f.SinglePost(blog, "p1", edited)
+	if err := New(f.client, cfg).Sync(); err != nil {
+		t.Fatalf("Sync: %v\n%s", err, f.log.joined())
+	}
+	if got := readFileString(t, filepath.Join(postDir, "image_001.jpg")); got != "IMG-C" || cGETs.Load() != 1 {
+		t.Errorf("image_001 = %q after %d GETs, want IMG-C fetched on the next edit", got, cGETs.Load())
 	}
 }
