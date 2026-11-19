@@ -2,6 +2,7 @@ package syncer
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -230,7 +231,51 @@ func TestCheckRemoteSize_NoContentLengthIsLoggedNotMismatched(t *testing.T) {
 	if got != "" {
 		t.Errorf("got %q, want empty (transient → logged, not mismatch)", got)
 	}
-	if !strings.Contains(log.joined(), "no Content-Length") {
+	if !strings.Contains(log.joined(), "without a size") {
 		t.Errorf("expected log about missing Content-Length, got %q", log.joined())
+	}
+}
+
+// The image CDN answers HEAD with 405; the size then comes from a one-byte
+// range GET's Content-Range total.
+func TestCheckRemoteSize_RangeFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Range", "bytes 0-0/12345")
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+	localPath := filepath.Join(t.TempDir(), "image_001.jpg")
+	if err := os.WriteFile(localPath, []byte("short"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := checkRemoteSize(srv.Client(), boosty.UserAgent, &recordingLogger{}, srv.URL, localPath, "image_001.jpg")
+	if !strings.Contains(got, "image_001.jpg") {
+		t.Errorf("got %q, want a mismatch from the range total", got)
+	}
+}
+
+// A server that ignores Range answers the probe GET with the whole object;
+// its Content-Length is the size.
+func TestCheckRemoteSize_RangeIgnored(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Write([]byte("the whole image"))
+	}))
+	defer srv.Close()
+	localPath := filepath.Join(t.TempDir(), "image_001.jpg")
+	if err := os.WriteFile(localPath, []byte("short"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := checkRemoteSize(srv.Client(), boosty.UserAgent, &recordingLogger{}, srv.URL, localPath, "image_001.jpg")
+	if !strings.Contains(got, "image_001.jpg") {
+		t.Errorf("got %q, want a mismatch from the 200's Content-Length", got)
 	}
 }

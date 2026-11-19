@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/wpt/b00p/pkg/boosty"
@@ -208,35 +209,68 @@ func checkRemoteSize(httpc *http.Client, ua string, log boosty.Logger,
 	if err != nil {
 		return fmt.Sprintf("%s missing", filename)
 	}
-
-	req, err := http.NewRequest("HEAD", url, nil)
-	if err != nil {
-		log.Printf("  check-media %s: build request: %v", filename, boosty.RedactURLError(err))
+	remote, why := remoteSize(httpc, ua, url)
+	if remote <= 0 {
+		log.Printf("  check-media %s: %s; skipping size check", filename, why)
 		return ""
 	}
-	req.Header.Set("User-Agent", ua)
-
-	resp, err := httpc.Do(req)
-	if err != nil {
-		log.Printf("  check-media %s: HEAD error: %v", filename, boosty.RedactURLError(err))
-		return ""
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("  check-media %s: HEAD %d; skipping size check", filename, resp.StatusCode)
-		return ""
-	}
-	if resp.ContentLength <= 0 {
-		log.Printf("  check-media %s: no Content-Length", filename)
-		return ""
-	}
-	if localInfo.Size() != resp.ContentLength {
+	if localInfo.Size() != remote {
 		return fmt.Sprintf("%s: local %s vs remote %s",
 			filename,
 			boosty.FormatSize(localInfo.Size()),
-			boosty.FormatSize(resp.ContentLength),
+			boosty.FormatSize(remote),
 		)
 	}
 	return ""
+}
+
+// remoteSize returns the object's size from a HEAD, or, when HEAD gives none
+// (the image CDN answers 405), from a one-byte Range GET: its Content-Range
+// total, or the Content-Length of a 200 that ignored the range. 0 means
+// unknown, with why.
+func remoteSize(httpc *http.Client, ua, url string) (int64, string) {
+	resp, err := sizeRequest(httpc, ua, "HEAD", url, "")
+	if err != nil {
+		return 0, "HEAD error: " + err.Error()
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 {
+		return resp.ContentLength, ""
+	}
+	why := fmt.Sprintf("HEAD %d without a size", resp.StatusCode)
+
+	resp, err = sizeRequest(httpc, ua, "GET", url, "bytes=0-0")
+	if err != nil {
+		return 0, why + ", range GET error: " + err.Error()
+	}
+	// Closed unread: a server that ignores Range sends the whole object,
+	// and only its headers are needed.
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 {
+		return resp.ContentLength, "" // Range ignored (the image CDN)
+	}
+	if resp.StatusCode != http.StatusPartialContent {
+		return 0, fmt.Sprintf("%s, range GET %d", why, resp.StatusCode)
+	}
+	_, total, _ := strings.Cut(resp.Header.Get("Content-Range"), "/")
+	n, err := strconv.ParseInt(strings.TrimSpace(total), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, why + ", range GET without a total"
+	}
+	return n, ""
+}
+
+// sizeRequest sends a body-less size probe; errors are redacted, since the
+// URL carries signing credentials.
+func sizeRequest(httpc *http.Client, ua, method, url, rng string) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		return nil, boosty.RedactURLError(err)
+	}
+	req.Header.Set("User-Agent", ua)
+	if rng != "" {
+		req.Header.Set("Range", rng)
+	}
+	resp, err := httpc.Do(req)
+	return resp, boosty.RedactURLError(err)
 }

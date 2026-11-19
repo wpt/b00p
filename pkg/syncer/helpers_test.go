@@ -34,12 +34,13 @@ func (r *recordingLogger) joined() string {
 	return strings.Join(r.lines, "\n")
 }
 
-// fakeHeadServer serves HEAD responses per the test table.
+// fakeHeadServer serves HEAD responses per the test table. The range GET
+// fallback gets the same answer, so a size the HEAD lacks stays unknown.
 func fakeHeadServer(t *testing.T, wantUA string, status int, contentLength int64) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodHead {
-			t.Errorf("method = %q, want HEAD", r.Method)
+		if r.Method != http.MethodHead && r.Header.Get("Range") != "bytes=0-0" {
+			t.Errorf("request = %s Range %q, want HEAD or a one-byte range GET", r.Method, r.Header.Get("Range"))
 		}
 		if wantUA != "" && r.Header.Get("User-Agent") != wantUA {
 			// Simulate okcdn behavior: wrong UA → 400 with tiny body.
