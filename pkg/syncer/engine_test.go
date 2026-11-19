@@ -324,6 +324,7 @@ func TestEngine_ApplyItem_FailedCommentsPreservesUpdatedAt(t *testing.T) {
 // post.md's path: WriteFileAtomic ultimately rename()s onto post.md, which
 // errors when the destination is a non-empty directory on every platform.
 func TestEngine_ApplyItem_EditedMdFailurePreservesUpdatedAt(t *testing.T) {
+	noLockRetry(t)
 	blog := "myblog"
 	f := newFakeAPI(t)
 

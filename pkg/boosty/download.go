@@ -466,13 +466,13 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 
 // commitTmp renames a finished tmp over path. A Windows player, antivirus or
 // indexer holding either file open blocks the rename until it lets go, so it
-// is retried for lockRetryWindow. If it still fails, the tmp and its sidecar
+// is retried (fileutil.RetryLocked). If it still fails, the tmp and its sidecar
 // stay (downloadOnce renames a complete one without a GET when the sidecar
 // knows the total), and the error is non-retriable: another attempt in this
 // run would hit the same lock.
 func (c *Client) commitTmp(tmpPath, sidecarPath, path string, size int64) error {
 	filename := filepath.Base(path)
-	if err := retryLocked(func() error { return os.Rename(tmpPath, path) }); err != nil {
+	if err := fileutil.RetryLocked(func() error { return os.Rename(tmpPath, path) }); err != nil {
 		return fmt.Errorf("download %s: %w; complete tmp kept for the next run (%w)", filename, err, errNonRetriable)
 	}
 	// Sidecar's only purpose is resume safety — once the final file is in

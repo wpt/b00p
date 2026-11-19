@@ -19,6 +19,7 @@ import (
 // auth.json.new. Here the refresh runs inside MaybeRefreshSignedURLs, which
 // logs its GetJSON error and carries on with the list copy.
 func TestEngine_TokenSaveFailureFailsRun(t *testing.T) {
+	noLockRetry(t)
 	f := newFakeAPI(t)
 	f.Media("video.mp4", []byte("VIDEO"))
 	post := boosty.Post{

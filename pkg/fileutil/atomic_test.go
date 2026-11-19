@@ -68,6 +68,9 @@ func TestWriteFileAtomic_BareFilename(t *testing.T) {
 // A failed rename (here: onto a non-empty directory) must not leave the
 // temp file behind; every later write would add another orphan.
 func TestWriteFileAtomic_FailedRenameRemovesTemp(t *testing.T) {
+	saved := LockRetryWindow
+	LockRetryWindow = 0
+	defer func() { LockRetryWindow = saved }()
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "out.json")
 	if err := os.MkdirAll(filepath.Join(dest, "child"), 0755); err != nil {
@@ -106,5 +109,28 @@ func TestWriteFileAtomic_Perm(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0600 {
 			t.Errorf("perm = %v, want 0600", got)
 		}
+	}
+}
+
+// A symlinked destination (an auth.json linked from a config directory) keeps
+// its link; the file it points to receives the bytes.
+func TestWriteFileAtomic_FollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.json")
+	if err := os.WriteFile(target, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if err := WriteFileAtomic(link, []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("link replaced by a regular file (mode %v, err %v)", fi.Mode(), err)
+	}
+	if data, _ := os.ReadFile(target); string(data) != "new" {
+		t.Errorf("target = %q, want new", data)
 	}
 }
