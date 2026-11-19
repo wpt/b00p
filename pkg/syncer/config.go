@@ -46,9 +46,11 @@ type Config struct {
 	// failures are logged and not propagated.
 	DownloadExternal bool
 
-	// Force ignores state during DownloadAll and re-processes every post.
-	// Existing non-empty media files are still skipped unless the post was
-	// edited since its post.json was saved (see SavePost).
+	// Force makes DownloadAll re-process every accessible post, not only
+	// the untracked ones. The prior entry still counts: its directory,
+	// HasMd and HasComments carry over, and existing non-empty media is
+	// kept unless the entry's UpdatedAt says the post was edited and that
+	// file's block changed.
 	Force bool
 
 	// CheckMedia runs HEAD-based video size validation as part of Sync.

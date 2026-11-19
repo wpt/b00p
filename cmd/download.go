@@ -40,7 +40,7 @@ func init() {
 	downloadCmd.Flags().BoolVar(&withMD, "md", false, "generate markdown file")
 	downloadCmd.Flags().BoolVar(&withComments, "comments", false, "download comments")
 	downloadCmd.Flags().BoolVar(&downloadExternal, "download-external", false, "download external videos via yt-dlp")
-	downloadCmd.Flags().BoolVar(&forceDownload, "force", false, "re-download all posts ignoring state")
+	downloadCmd.Flags().BoolVar(&forceDownload, "force", false, "process every post again, not only new ones; existing media is kept unless the post was edited")
 	downloadCmd.Flags().BoolVar(&syncMode, "sync", false, "sync mode: check for updates, show diff, confirm before applying")
 	downloadCmd.Flags().BoolVar(&checkMedia, "check-media", false, "with --sync: also validate video file sizes via HEAD requests")
 	downloadCmd.Flags().BoolVar(&checkFilesFlag, "check-files", false, "with --sync: verify post.json, comments.json, post.md exist on disk")
