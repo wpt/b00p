@@ -33,6 +33,7 @@ func assertBlogUnlocked(t *testing.T, e *Engine, after string) {
 // point of a second Engine must fail fast instead, and the first run must
 // finish untouched.
 func TestEngine_SecondRunOnSameBlogFailsFast(t *testing.T) {
+	shortenLockWait(t)
 	saved := boosty.RetryDelays
 	boosty.RetryDelays = []time.Duration{time.Millisecond}
 	defer func() { boosty.RetryDelays = saved }()
@@ -147,6 +148,7 @@ func TestBlogLock_ExcludesOtherProcessAndDiesWithIt(t *testing.T) {
 		os.Exit(0)
 	}
 
+	shortenLockWait(t)
 	path := filepath.Join(t.TempDir(), blogLockName)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBlogLock_ExcludesOtherProcessAndDiesWithIt$")
 	cmd.Env = append(os.Environ(), "B00P_TEST_LOCK_HOLDER="+path)
