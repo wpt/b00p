@@ -43,13 +43,14 @@ func RedactURLError(err error) error {
 // other cancellation — otherwise it all collapses to "context canceled".
 var errIdleTimeout = errors.New("idle timeout: no response body bytes for 60s")
 
-const (
-	// downloadIdleTimeout is the maximum time downloadOnce waits between bytes
-	// on the response body before cancelling the request. A wedged TCP stream
-	// that stops delivering bytes mid-stream would otherwise block io.Copy
-	// indefinitely and never give the retry loop a chance to fire.
-	downloadIdleTimeout = 60 * time.Second
+// downloadIdleTimeout is the maximum time downloadOnce waits between bytes
+// on the response body before cancelling the request. A wedged TCP stream
+// that stops delivering bytes mid-stream would otherwise block io.Copy
+// indefinitely and never give the retry loop a chance to fire.
+// A variable so tests can shrink it.
+var downloadIdleTimeout = 60 * time.Second
 
+const (
 	// downloadHeaderTimeout caps how long DownloadHTTP waits for response
 	// headers after the request body is fully written. Catches the case
 	// where the TCP connection is established but the server never replies.
