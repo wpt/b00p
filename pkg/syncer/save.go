@@ -108,7 +108,7 @@ func (e *Engine) savePost(post *boosty.Post, dirName string, withMD, withComment
 	if !known {
 		prev, known = readPostUpdatedAt(dir)
 	}
-	edited := known && prev != post.UpdatedAt
+	edited := known && post.UpdatedAt != 0 && prev != post.UpdatedAt
 	if edited {
 		e.c.Log.Printf("  post edited since last save; re-downloading changed media: %s", post.Title)
 	}
@@ -136,6 +136,18 @@ func readPostUpdatedAt(dir string) (int64, bool) {
 		return 0, false
 	}
 	return p.UpdatedAt, true
+}
+
+// postJSONHasBlocks reports whether dir/post.json holds a post with content.
+func postJSONHasBlocks(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "post.json"))
+	if err != nil {
+		return false
+	}
+	var p struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	return json.Unmarshal(data, &p) == nil && len(p.Data) > 0
 }
 
 // parsePostContent parses a post's content blocks, attaches the post-level
@@ -174,7 +186,9 @@ func (e *Engine) parsePostContent(post *boosty.Post) parser.ParsedContent {
 // Caller passes the result back into SavePost / state.Add, so post.json,
 // the downloaded bytes, and the state entry all reflect the same payload.
 func (e *Engine) MaybeRefreshSignedURLs(post *boosty.Post) *boosty.Post {
-	if !hasSignedMedia(post.Data) {
+	// A listing copy without blocks is refetched too: the listing may have
+	// dropped them, and an empty copy would be archived as the post.
+	if !hasSignedMedia(post.Data) && len(post.Data) > 0 {
 		return post
 	}
 	var fresh boosty.Post
@@ -182,7 +196,7 @@ func (e *Engine) MaybeRefreshSignedURLs(post *boosty.Post) *boosty.Post {
 		e.c.Log.Printf("  warning: refresh signed video URLs failed for %s: %v", post.ID, err)
 		return post
 	}
-	if fresh.IsStub() {
+	if fresh.DegradedFrom(post) {
 		e.c.Log.Printf("  warning: per-post fetch for %s returned no-access/empty stub; using list-endpoint copy", post.ID)
 		return post
 	}

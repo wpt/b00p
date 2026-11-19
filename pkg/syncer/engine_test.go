@@ -424,7 +424,8 @@ func TestEngine_ApplyItem_StubPostPreservesDiskAndState(t *testing.T) {
 				t.Fatal(err)
 			}
 			item := syncItem{
-				Post:     boosty.Post{ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200},
+				Post: boosty.Post{ID: "p1", Title: "new", HasAccess: true, UpdatedAt: 200,
+					Data: []boosty.ContentBlock{{Type: "text", Content: `["x","unstyled",[]]`}}},
 				DirName:  "p1_dir",
 				Existing: st.Posts["p1"],
 				InState:  true,

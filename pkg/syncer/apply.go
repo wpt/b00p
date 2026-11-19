@@ -250,7 +250,7 @@ func (e *Engine) applyExisting(st *state.State, item syncItem) {
 
 	// The fetch may be newer than the listing that classified the item: an
 	// edit between the two must still replace the swapped blocks.
-	edited := item.Edited || (old.UpdatedAt != 0 && fullPost.UpdatedAt != old.UpdatedAt)
+	edited := item.Edited || (old.UpdatedAt != 0 && fullPost.UpdatedAt != 0 && fullPost.UpdatedAt != old.UpdatedAt)
 	media := newMediaPlan(dir, old, fullPost.UpdatedAt, edited, item.MismatchedVideos)
 	out, err := e.runApplyActions(dir, &fullPost, media, actions)
 	if err != nil {
@@ -303,7 +303,7 @@ func (e *Engine) fetchFullPost(classified boosty.Post, actions applyActions) (bo
 		e.c.Log.Printf("  error fetching post %s: %v", classified.Title, err)
 		return boosty.Post{}, false
 	}
-	if p.IsStub() {
+	if p.DegradedFrom(&classified) {
 		e.c.Log.Printf("  warning: per-post fetch for %s returned no-access/empty stub; skipping apply (state preserved, will retry next sync)", classified.ID)
 		return boosty.Post{}, false
 	}
@@ -331,6 +331,11 @@ func (e *Engine) runApplyActions(dir string, post *boosty.Post, media mediaPlan,
 	var errs []error
 
 	if actions.Post {
+		// A payload whose blocks went missing (API drift, a degraded copy
+		// no guard caught) must not erase an archived post's text.
+		if len(post.Data) == 0 && postJSONHasBlocks(dir) {
+			return out, errors.New("post.json: refusing to replace archived content with a payload that has none")
+		}
 		if err := writeJSON(filepath.Join(dir, "post.json"), post.Raw, post); err != nil {
 			return out, fmt.Errorf("post.json: %w", err)
 		}
@@ -437,7 +442,7 @@ func buildSyncEntry(old state.PostEntry, post *boosty.Post, dirName string,
 	entry.Tier = post.TierName()
 	if out.allOK() {
 		entry.Locked = false
-		if edited {
+		if edited && post.UpdatedAt != 0 {
 			entry.UpdatedAt = post.UpdatedAt
 		}
 	}

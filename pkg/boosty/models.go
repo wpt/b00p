@@ -55,14 +55,22 @@ func (p *Post) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// IsStub reports whether the per-post endpoint returned a degraded payload:
-// no access, or an empty block list. Both happen when the subscription
-// lapsed (or the post was locked server-side) between a list call and the
-// per-post call. Callers must not write such a payload over an existing
-// post.json — parsing empty Data into empty media would tick every artefact
-// channel OK and advance state against a corrupted copy.
+// IsStub reports whether a per-post payload cannot be archived: no access
+// (the subscription lapsed, or the post was locked server-side, between a
+// list call and the per-post call) or no id. Callers must not write such a
+// payload over an existing post.json — parsing its empty Data into empty
+// media would tick every artefact channel OK and advance state against a
+// corrupted copy. An accessible post with no blocks is not a stub on its
+// own: some posts are empty; see DegradedFrom.
 func (p *Post) IsStub() bool {
-	return !p.HasAccess || len(p.Data) == 0
+	return !p.HasAccess || p.ID == ""
+}
+
+// DegradedFrom reports whether p, fetched from the per-post endpoint, is a
+// worse copy of listed, the same post from the listing: a stub, a different
+// post, or an empty block list where the listing had blocks.
+func (p *Post) DegradedFrom(listed *Post) bool {
+	return p.IsStub() || p.ID != listed.ID || (len(p.Data) == 0 && len(listed.Data) > 0)
 }
 
 // TierName returns the subscription tier name required for the post, or ""
