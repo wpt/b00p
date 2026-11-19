@@ -97,14 +97,6 @@ type DownloadRequest struct {
 	Replace bool
 }
 
-// DownloadFile downloads url to path, skipping the download when path
-// already holds a non-empty file (0-byte leftovers are re-downloaded). Media
-// that must be refreshed over an existing copy goes through Download with
-// Replace set.
-func (c *Client) DownloadFile(url, path string) error {
-	return c.Download(DownloadRequest{URL: url, Path: path})
-}
-
 // Download runs req with the retry schedule: first attempt + one retry per
 // RetryDelays entry on transport errors, 5xx and 429; deterministic 4xx and a
 // blocked rename fail fast. Progress is reported through the client's
