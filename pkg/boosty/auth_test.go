@@ -1,13 +1,15 @@
 package boosty
 
 import (
-	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -141,19 +143,18 @@ func TestRefresh_WireRequest(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/oauth/token/" {
 			t.Errorf("request = %s %s, want POST /oauth/token/", r.Method, r.URL.Path)
 		}
-		if got := r.Header.Get("Content-Type"); got != "application/json" {
-			t.Errorf("Content-Type = %q, want application/json", got)
+		if got := r.Header.Get("Content-Type"); got != "application/x-www-form-urlencoded" {
+			t.Errorf("Content-Type = %q, want a form", got)
 		}
 		if got := r.Header.Get("User-Agent"); got != UserAgent {
 			t.Errorf("User-Agent = %q, want the browser UA", got)
 		}
-		var body map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode wire body: %v", err)
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse wire body: %v", err)
 		}
-		want := map[string]string{"device_id": deviceID, "refresh_token": refreshToken}
-		if !maps.Equal(body, want) {
-			t.Errorf("wire body = %q, want %q", body, want)
+		want := url.Values{"device_id": {deviceID}, "device_os": {"web"}, "grant_type": {"refresh_token"}, "refresh_token": {refreshToken}}
+		if !maps.EqualFunc(r.PostForm, want, slices.Equal) {
+			t.Errorf("wire body = %q, want %q", r.PostForm, want)
 		}
 		w.Write([]byte(`{"access_token":"a2","refresh_token":"r2","expires_in":3600}`))
 	}))
@@ -303,5 +304,18 @@ func TestLoadTokens_BOMAndUTF16(t *testing.T) {
 				t.Errorf("tokens = %+v", tok)
 			}
 		})
+	}
+}
+
+// Without a device id the token endpoint rejects the refresh, which would
+// read as a dead token; the client must not send it and must say what to add.
+func TestRefresh_NeedsDeviceID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("refresh sent without a device id")
+	}))
+	defer server.Close()
+	tok := &Tokens{AccessToken: "a1", RefreshToken: "r1"}
+	if err := tok.Refresh(rewriteClient(t, server)); !errors.Is(err, ErrNoDeviceID) {
+		t.Errorf("Refresh = %v, want ErrNoDeviceID", err)
 	}
 }

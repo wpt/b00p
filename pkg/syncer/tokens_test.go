@@ -48,6 +48,7 @@ func TestEngine_TokenSaveFailureFailsRun(t *testing.T) {
 	mustMkdir(t, filepath.Join(authPath, "blocker"))
 	f.client.AuthPath = authPath
 	f.client.Tokens.RefreshToken = "old-refresh"
+	f.client.Tokens.DeviceID = "dev"
 	saved := boosty.RetryDelays
 	boosty.RetryDelays = []time.Duration{time.Millisecond}
 	defer func() { boosty.RetryDelays = saved }()

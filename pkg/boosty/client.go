@@ -167,7 +167,7 @@ func (c *Client) GetJSON(url string, out any) error {
 
 		resp, err := c.doRequest("GET", url)
 		if err != nil {
-			if errors.Is(err, ErrRefreshRejected) || errors.Is(err, ErrTokenSaveFailed) || errors.Is(err, ErrAuthNotWritable) {
+			if errors.Is(err, ErrRefreshRejected) || errors.Is(err, ErrTokenSaveFailed) || errors.Is(err, ErrAuthNotWritable) || errors.Is(err, ErrNoDeviceID) {
 				return err
 			}
 			lastErr = err
