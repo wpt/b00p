@@ -1694,3 +1694,23 @@ func TestFormatSize(t *testing.T) {
 		}
 	}
 }
+
+// A block page is tens of KB of HTML; the error and each retry log line
+// must carry a one-line snippet of it, not the whole page.
+func TestGetJSON_ErrorBodyIsSnippet(t *testing.T) {
+	page := "<html>\n" + strings.Repeat("<p>blocked</p>\n", 3000) + "</html>"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, page)
+	}))
+	defer server.Close()
+	c := &Client{Tokens: &Tokens{AccessToken: "t"}, HTTP: server.Client(), Log: discardLogger{}}
+
+	err := c.GetJSON(server.URL+"/v1/x", &struct{}{})
+	if err == nil {
+		t.Fatal("GetJSON on a 403 returned nil")
+	}
+	if msg := err.Error(); len(msg) > 1024 || strings.Contains(msg, "\n") || !strings.Contains(msg, "<p>blocked</p>") {
+		t.Errorf("error is %d bytes, newline=%v; want a one-line snippet under 1 KB: %.200s", len(msg), strings.Contains(msg, "\n"), msg)
+	}
+}

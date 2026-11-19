@@ -313,10 +313,8 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 		return fmt.Errorf("download %s: range not satisfiable; tmp reset", filename)
 	default:
 		// Include a body snippet for diagnosis — bare "status 403" hides the
-		// CDN's explanation. okcdn returns plaintext or JSON; cap the read
-		// so an HTML challenge page doesn't dominate the log line.
-		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		bodyStr := strings.TrimSpace(string(bodySnippet))
+		// CDN's explanation.
+		bodyStr := bodySnippet(resp.Body)
 		// 400 / 403 / 410 on signed CDN URLs is usually expiry or IP-binding —
 		// add a hint so the user knows to re-run rather than chase a token bug.
 		hint := ""

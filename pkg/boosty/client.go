@@ -166,14 +166,9 @@ func (c *Client) GetJSON(url string, out any) error {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			// Best-effort read for error context: if the body itself errors out
-			// (truncated stream, mid-read network drop), the status code we
-			// already have is the load-bearing diagnostic, so a partial body —
-			// or none at all — is acceptable and we intentionally discard the
-			// read error.
-			body, _ := io.ReadAll(resp.Body)
+			snippet := bodySnippet(resp.Body)
 			resp.Body.Close()
-			httpErr := fmt.Errorf("API %s returned %d: %s", url, resp.StatusCode, string(body))
+			httpErr := fmt.Errorf("API %s returned %d: %s", url, resp.StatusCode, snippet)
 			// Boosty sits behind Cloudflare/QRATOR which can return 5xx or
 			// 429 under load. Treat those as transient and retry; everything
 			// else is a real error.
@@ -202,6 +197,22 @@ func (c *Client) GetJSON(url string, out any) error {
 		return nil
 	}
 	return fmt.Errorf("after %d retries: %w", len(RetryDelays), lastErr)
+}
+
+// bodySnippetLimit caps how much of an error response goes into an error.
+const bodySnippetLimit = 512
+
+// bodySnippet returns the start of an error response body on one line, for
+// diagnosis: a CDN or anti-bot block page is tens of KB of HTML, which would
+// otherwise fill the error and every retry log line. A read error only
+// shortens the snippet; the status code is the load-bearing diagnostic.
+func bodySnippet(r io.Reader) string {
+	data, _ := io.ReadAll(io.LimitReader(r, bodySnippetLimit+1))
+	s := strings.Join(strings.Fields(string(data[:min(len(data), bodySnippetLimit)])), " ")
+	if len(data) > bodySnippetLimit {
+		s += " …"
+	}
+	return s
 }
 
 // deterministic4xx reports whether an HTTP status is a permanent client-side
