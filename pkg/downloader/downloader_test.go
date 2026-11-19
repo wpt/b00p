@@ -366,7 +366,7 @@ func TestDownloadExternal_SeparatorBeforeURL(t *testing.T) {
 		t.Fatal("expected non-nil error from failing fake yt-dlp")
 	}
 
-	want := [][]string{{"--no-playlist", "-o", "external_%(extractor_key)s_%(id)s.%(ext)s", "--", videoURL}}
+	want := [][]string{{"--no-playlist", "-P", ".", "--no-download-archive", "-o", "external_%(extractor_key)s_%(id)s.%(ext)s", "--", videoURL}}
 	if got := calls(); !reflect.DeepEqual(got, want) {
 		t.Errorf("yt-dlp calls = %q, want %q", got, want)
 	}
@@ -394,7 +394,7 @@ func TestDownloadExternal_SkipsNonHTTPURL(t *testing.T) {
 			t.Errorf("error %q does not report skipped URL %q", err, u)
 		}
 	}
-	want := [][]string{{"--no-playlist", "-o", "external_%(extractor_key)s_%(id)s.%(ext)s", "--", goodURL}}
+	want := [][]string{{"--no-playlist", "-P", ".", "--no-download-archive", "-o", "external_%(extractor_key)s_%(id)s.%(ext)s", "--", goodURL}}
 	if got := calls(); !reflect.DeepEqual(got, want) {
 		t.Errorf("yt-dlp calls = %q, want only the https item %q", got, want)
 	}
