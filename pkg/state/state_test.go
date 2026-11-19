@@ -184,6 +184,23 @@ func TestState_LoadCorrupted(t *testing.T) {
 	}
 }
 
+// Only a missing file means a fresh state. Any other read error must fail
+// Load, or the next Save replaces every tracked post with an empty map.
+func TestState_LoadReadErrorFails(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, FileName), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Load(dir)
+	if err == nil {
+		t.Fatalf("Load with %s as a directory: error = nil, state = %+v", FileName, s)
+	}
+	if s != nil {
+		t.Errorf("Load state = %+v, want nil", s)
+	}
+}
+
 // TestState_ConcurrentAddSaveUnderExternalMutex exercises the documented
 // concurrency contract: State is safe under fan-out when callers serialize
 // every {Add → Save} via an external mutex. The syncer package follows this
