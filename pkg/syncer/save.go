@@ -113,7 +113,7 @@ func (e *Engine) savePost(post *boosty.Post, dirName string, withMD, withComment
 		e.c.Log.Printf("  post edited since last save; re-downloading changed media: %s", post.Title)
 	}
 
-	out, err := e.runApplyActions(dir, post, newMediaPlan(dir, old, edited, nil), applyActions{
+	out, err := e.runApplyActions(dir, post, newMediaPlan(dir, old, post.UpdatedAt, edited, nil), applyActions{
 		Post:     true,
 		Media:    true,
 		MD:       withMD,

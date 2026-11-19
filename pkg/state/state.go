@@ -48,8 +48,10 @@ type PostEntry struct {
 	// the bytes there, so an edit replaces only the files whose block
 	// changed. It is updated after every media run, failed or not, but only
 	// for files that landed: it can lag disk (costing a re-download), never
-	// name bytes that did not land.
-	Media map[string]string `json:"media,omitempty"`
+	// name bytes that did not land. An empty record is saved as {}: nil is
+	// an entry from before the record existed, and the syncer trusts the
+	// on-disk post.json for those, which an empty record must not reach.
+	Media map[string]string `json:"media"`
 	// Archive is the format post.json and post.md were last written in (see
 	// archiveFormat in pkg/syncer). 0 marks files from v0.5.0 or older: their
 	// post.json dropped list items and fields the structs did not declare,

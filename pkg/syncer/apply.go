@@ -248,7 +248,10 @@ func (e *Engine) applyExisting(st *state.State, item syncItem) {
 		return
 	}
 
-	media := newMediaPlan(dir, old, item.Edited, item.MismatchedVideos)
+	// The fetch may be newer than the listing that classified the item: an
+	// edit between the two must still replace the swapped blocks.
+	edited := item.Edited || (old.UpdatedAt != 0 && fullPost.UpdatedAt != old.UpdatedAt)
+	media := newMediaPlan(dir, old, fullPost.UpdatedAt, edited, item.MismatchedVideos)
 	out, err := e.runApplyActions(dir, &fullPost, media, actions)
 	if err != nil {
 		// Logged here, not inside runApplyActions, so a post fails once in
@@ -342,6 +345,7 @@ func (e *Engine) runApplyActions(dir string, post *boosty.Post, media mediaPlan,
 	}
 
 	if actions.Media {
+		media.noteKept(dir, parsed.Media)
 		landed, err := downloader.DownloadMedia(c, parsed.Media, dir, media.replaces)
 		out.Media = media.record(landed)
 		if err != nil {
