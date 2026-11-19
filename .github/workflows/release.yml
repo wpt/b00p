@@ -17,7 +17,13 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@v7
+      - name: govulncheck
+        # A tag ships binaries even when CI is red; refuse a vulnerable
+        # toolchain or dependency here too.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 ./...
+      # Third-party action with a write token: pinned to a commit, since a
+      # tag can be moved. Dependabot bumps the SHA and the comment.
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           # Pin to goreleaser v2.x so artifact naming/format is reproducible
           # across the v0.x.y release series. Bump intentionally, not silently.

@@ -98,7 +98,9 @@ jobs:
           name: coverage-badge
           path: .pages
       - name: Publish coverage badge to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
+        # Third-party action with a write token: pinned to a commit, since a
+        # tag can be moved. Dependabot bumps the SHA and the comment.
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./.pages
