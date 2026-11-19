@@ -85,17 +85,25 @@ func TestDownloadMedia_SkipsExternalVideos(t *testing.T) {
 	log := &recordingLogger{}
 	c := newTestClient(server, log)
 
+	// The URLs point at the test server so a regression that downloads them
+	// shows up as hits, not as an unreachable host.
 	media := []parser.MediaItem{
-		{Type: "external_video", URL: "https://youtu.be/abc"},
-		{Type: "external_video", URL: "https://vk.com/video123"},
+		{Type: "external_video", URL: server.URL + "/abc", Filename: "external_001"},
+		{Type: "external_video", URL: server.URL + "/video123", Filename: "external_002"},
 	}
 	dir := t.TempDir()
-	_, err := DownloadMedia(c, media, dir, nil)
+	landed, err := DownloadMedia(c, media, dir, nil)
 	if err != nil {
 		t.Fatalf("DownloadMedia: %v, want nil", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 0 {
 		t.Errorf("HTTP hits = %d, want 0 (external videos must be skipped)", got)
+	}
+	if len(landed) != 0 {
+		t.Errorf("landed = %v, want none", landed)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("dir holds %d entries, want none", len(entries))
 	}
 }
 
