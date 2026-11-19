@@ -69,7 +69,7 @@ b00p download --blog <blog> --sync --yes
 | `--sync` | Show what changed and ask before applying |
 | `--yes` | With `--sync`: apply without asking |
 | `--check-files` | With `--sync`: restore missing `post.json`, `post.md` and `comments.json` |
-| `--check-media` | With `--sync`: re-download videos whose size differs from the server |
+| `--check-media` | With `--sync`: re-download media files whose size differs from the server |
 | `--force` | Process every post again, not only new ones |
 | `--workers N` | Posts processed in parallel (default 1) |
 | `--format FMT` | Folder name for new posts (default `{date}_{title}`); existing folders keep theirs |

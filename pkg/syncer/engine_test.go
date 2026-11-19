@@ -805,10 +805,10 @@ func TestEngine_SavePost_EditedSinceLastSaveReplacesMedia(t *testing.T) {
 	}
 }
 
-// A VIDEO_MISMATCH re-download that fails must leave the previous file in
+// A SIZE_MISMATCH re-download that fails must leave the previous file in
 // place: with the old delete-then-download order the archive lost every
 // video of the post and no trigger short of another --check-media noticed.
-func TestEngine_ApplyItem_VideoMismatchFailedRedownloadKeepsOldFile(t *testing.T) {
+func TestEngine_ApplyItem_SizeMismatchFailedRedownloadKeepsOldFile(t *testing.T) {
 	saved := boosty.RetryDelays
 	boosty.RetryDelays = []time.Duration{time.Millisecond}
 	defer func() { boosty.RetryDelays = saved }()
@@ -841,8 +841,8 @@ func TestEngine_ApplyItem_VideoMismatchFailedRedownloadKeepsOldFile(t *testing.T
 	}
 	e.applyItem(st, syncItem{
 		Post: post, DirName: "p1_dir", Existing: st.Posts["p1"], InState: true,
-		VideoMismatch:    "video_001.mp4: local 15 B vs remote 99 B",
-		MismatchedVideos: []string{"video_001.mp4"},
+		SizeMismatch:    "video_001.mp4: local 15 B vs remote 99 B",
+		MismatchedMedia: []string{"video_001.mp4"},
 	})
 
 	if data, _ := os.ReadFile(filepath.Join(postDir, "video_001.mp4")); string(data) != "old-video-bytes" {
@@ -1389,9 +1389,9 @@ func TestEngine_Sync_RestoresMissingFiles(t *testing.T) {
 
 // --- runCheckMedia: worker-pool dispatch ---
 //
-// checks_test.go exhaustively covers checkRemoteVideoSize (the leaf). This
+// checks_test.go exhaustively covers checkRemoteSize (the leaf). This
 // test covers the dispatcher itself: items in state with ok_video flow
-// through workers and end up with VideoMismatch set per their local-vs-HEAD
+// through workers and end up with SizeMismatch set per their local-vs-HEAD
 // delta. Items without ok_video and items not in state are skipped.
 func TestEngine_RunCheckMedia_FlagsOnlyMismatchedPosts(t *testing.T) {
 	blog := "myblog"
@@ -1438,10 +1438,10 @@ func TestEngine_RunCheckMedia_FlagsOnlyMismatchedPosts(t *testing.T) {
 	e := New(f.client, cfg)
 	e.runCheckMedia(blogDir, items)
 
-	if items[0].VideoMismatch != "" {
-		t.Errorf("p1 (matching size) flagged: %q", items[0].VideoMismatch)
+	if items[0].SizeMismatch != "" {
+		t.Errorf("p1 (matching size) flagged: %q", items[0].SizeMismatch)
 	}
-	if items[1].VideoMismatch == "" {
+	if items[1].SizeMismatch == "" {
 		t.Error("p2 (size mismatch) was not flagged")
 	}
 }

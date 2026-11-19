@@ -94,10 +94,12 @@ func missingMedia(blocks []boosty.ContentBlock, dir string) bool {
 	})
 }
 
-// runCheckMedia performs HEAD-based video size validation in parallel and
-// records mismatches on the corresponding items. Items that already have
-// IsNew/JustUnlocked/etc. set are skipped — they will get fresh media
-// regardless via the apply phase.
+// runCheckMedia compares every downloaded media file of the tracked posts
+// with the server's size (HEAD) in parallel and records mismatches on the
+// corresponding items. A truncated but non-empty file is invisible to the
+// per-sync stat (missingMedia), so this is the repair path for it. Items
+// that already have IsNew/JustUnlocked/etc. set are skipped — they will get
+// fresh media regardless via the apply phase.
 func (e *Engine) runCheckMedia(blogDir string, items []syncItem) {
 	c := e.c
 	var jobs []int
@@ -118,22 +120,24 @@ func (e *Engine) runCheckMedia(blogDir string, items []syncItem) {
 	runWorkerPool(e.cfg.Workers, jobs, func(idx int) {
 		post := items[idx].Post
 		dir := filepath.Join(blogDir, items[idx].DirName)
-		mismatch, files := e.checkVideoSizes(&post, dir)
+		mismatch, files := e.checkMediaSizes(&post, dir)
 		if mismatch != "" {
 			// Distinct indices per worker → safe write.
-			items[idx].VideoMismatch = mismatch
-			items[idx].MismatchedVideos = files
+			items[idx].SizeMismatch = mismatch
+			items[idx].MismatchedMedia = files
 		}
 	})
 }
 
-// checkVideoSizes validates local video files against remote for a post.
-// Skips posts with no native video (ok_video) — nothing to verify. Otherwise
-// fetches fresh video URLs and does authenticated HEAD requests, collecting
-// all mismatches rather than bailing on the first one. Returns the joined
-// issues and the filenames they are about.
-func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) (string, []string) {
-	if !hasOkVideo(post.Data) {
+// checkMediaSizes validates a post's local media files against the server.
+// Skips posts with nothing b00p downloads. Otherwise fetches the post for
+// fresh signed URLs and HEADs every file, collecting all mismatches rather
+// than bailing on the first one. Returns the joined issues and the
+// filenames they are about.
+func (e *Engine) checkMediaSizes(post *boosty.Post, dir string) (string, []string) {
+	if !slices.ContainsFunc(post.Data, func(b boosty.ContentBlock) bool {
+		return b.Type == "image" || b.Type == "ok_video" || b.Type == "audio_file" || b.Type == "file"
+	}) {
 		return "", nil
 	}
 
@@ -143,14 +147,19 @@ func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) (string, []strin
 		c.Log.Printf("  check-media %s: fetch failed: %v", post.ID, err)
 		return "", nil
 	}
+	if fullPost.DegradedFrom(post) {
+		c.Log.Printf("  check-media %s: per-post fetch returned a stub; skipped", post.ID)
+		return "", nil
+	}
 
 	parsed := parser.ParseBlocks(fullPost.Data)
+	parser.ApplySignedQuery(parsed.Media, fullPost.SignedQuery)
 	var issues, files []string
 	for _, m := range parsed.Media {
-		if m.Type != "video" {
+		if !downloadable(m) {
 			continue
 		}
-		if issue := checkRemoteVideoSize(c.HTTP, boosty.UserAgent, c.Log,
+		if issue := checkRemoteSize(c.HTTP, boosty.UserAgent, c.Log,
 			m.URL, filepath.Join(dir, m.Filename), m.Filename); issue != "" {
 			issues = append(issues, issue)
 			files = append(files, m.Filename)
@@ -159,23 +168,23 @@ func (e *Engine) checkVideoSizes(post *boosty.Post, dir string) (string, []strin
 	return strings.Join(issues, "; "), files
 }
 
-// hasOkVideo reports whether any block is a native (ok_video) video.
-func hasOkVideo(blocks []boosty.ContentBlock) bool {
-	return slices.ContainsFunc(blocks, func(b boosty.ContentBlock) bool { return b.Type == "ok_video" })
+// downloadable reports whether b00p downloads m itself (external videos go
+// through yt-dlp and are not size-checked).
+func downloadable(m parser.MediaItem) bool {
+	return m.Type != "external_video" && m.URL != ""
 }
 
 // hasSignedMedia reports whether the post carries content whose download
 // URLs are signed and can go stale between the list call and the apply:
 // native ok_video (per-block signed okcdn URLs) and audio/file attachments
-// (post-level signedQuery). Gates MaybeRefreshSignedURLs; checkVideoSizes
-// keeps using hasOkVideo because it validates videos only.
+// (post-level signedQuery). Gates MaybeRefreshSignedURLs.
 func hasSignedMedia(blocks []boosty.ContentBlock) bool {
 	return slices.ContainsFunc(blocks, func(b boosty.ContentBlock) bool {
 		return b.Type == "ok_video" || b.Type == "audio_file" || b.Type == "file"
 	})
 }
 
-// checkRemoteVideoSize compares local file size with the server's Content-Length
+// checkRemoteSize compares local file size with the server's Content-Length
 // obtained via HEAD. The okcdn signed URLs bind to the UA used to fetch them, so
 // we must reuse the client's User-Agent.
 //
@@ -192,8 +201,8 @@ func hasSignedMedia(blocks []boosty.ContentBlock) bool {
 // (missing, size differs from a 200 with Content-Length). Everything else —
 // network error, non-200 status, missing Content-Length — is logged and
 // returns empty: a 403/405/5xx says nothing about the bytes on disk, and a
-// mismatch verdict makes the apply phase re-download the video.
-func checkRemoteVideoSize(httpc *http.Client, ua string, log boosty.Logger,
+// mismatch verdict makes the apply phase re-download the file.
+func checkRemoteSize(httpc *http.Client, ua string, log boosty.Logger,
 	url, localPath, filename string) string {
 	localInfo, err := os.Stat(localPath)
 	if err != nil {

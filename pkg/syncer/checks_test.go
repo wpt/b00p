@@ -111,26 +111,6 @@ func TestMissingMedia(t *testing.T) {
 	}
 }
 
-func TestHasOkVideo(t *testing.T) {
-	cases := []struct {
-		name   string
-		blocks []boosty.ContentBlock
-		want   bool
-	}{
-		{"empty", nil, false},
-		{"only text", []boosty.ContentBlock{{Type: "text"}}, false},
-		{"external video only", []boosty.ContentBlock{{Type: "video", URL: "https://youtu.be/x"}}, false},
-		{"ok_video present", []boosty.ContentBlock{{Type: "text"}, {Type: "ok_video"}}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := hasOkVideo(tc.blocks); got != tc.want {
-				t.Errorf("hasOkVideo = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // hasSignedMedia gates MaybeRefreshSignedURLs: audio/file attachments need a
 // fresh post-level signedQuery just like ok_video needs fresh okcdn URLs —
 // an attachment-only post saved against a stale list-endpoint payload would
@@ -156,42 +136,42 @@ func TestHasSignedMedia(t *testing.T) {
 	}
 }
 
-func TestCheckRemoteVideoSize_Match(t *testing.T) {
+func TestCheckRemoteSize_Match(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "video_001.mp4")
 	os.WriteFile(localPath, []byte("payload"), 0644) // 7 bytes
 
-	srv := fakeVideoServer(t, boosty.UserAgent, http.StatusOK, 7)
+	srv := fakeHeadServer(t, boosty.UserAgent, http.StatusOK, 7)
 	defer srv.Close()
 
 	log := &recordingLogger{}
-	got := checkRemoteVideoSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "video_001.mp4")
+	got := checkRemoteSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "video_001.mp4")
 	if got != "" {
 		t.Errorf("got %q, want empty; log=%s", got, log.joined())
 	}
 }
 
-func TestCheckRemoteVideoSize_SizeMismatch(t *testing.T) {
+func TestCheckRemoteSize_SizeMismatch(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "video_001.mp4")
 	os.WriteFile(localPath, []byte("short"), 0644) // 5 bytes
 
-	srv := fakeVideoServer(t, boosty.UserAgent, http.StatusOK, 999)
+	srv := fakeHeadServer(t, boosty.UserAgent, http.StatusOK, 999)
 	defer srv.Close()
 
 	log := &recordingLogger{}
-	got := checkRemoteVideoSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "video_001.mp4")
+	got := checkRemoteSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "video_001.mp4")
 	if !strings.Contains(got, "video_001.mp4") || !strings.Contains(got, "local") || !strings.Contains(got, "remote") {
 		t.Errorf("got %q, want a size mismatch description", got)
 	}
 }
 
-func TestCheckRemoteVideoSize_LocalMissing(t *testing.T) {
-	srv := fakeVideoServer(t, boosty.UserAgent, http.StatusOK, 7)
+func TestCheckRemoteSize_LocalMissing(t *testing.T) {
+	srv := fakeHeadServer(t, boosty.UserAgent, http.StatusOK, 7)
 	defer srv.Close()
 
 	log := &recordingLogger{}
-	got := checkRemoteVideoSize(srv.Client(), boosty.UserAgent, log,
+	got := checkRemoteSize(srv.Client(), boosty.UserAgent, log,
 		srv.URL, filepath.Join(t.TempDir(), "gone.mp4"), "gone.mp4")
 	if got != "gone.mp4 missing" {
 		t.Errorf("got %q, want 'gone.mp4 missing'", got)
@@ -202,16 +182,16 @@ func TestCheckRemoteVideoSize_LocalMissing(t *testing.T) {
 // can answer 403/405/5xx) says nothing about the local bytes. It must be
 // logged and skipped: a mismatch verdict would make the apply phase
 // re-download every video in the archive under --yes.
-func TestCheckRemoteVideoSize_Non200IsLoggedNotMismatched(t *testing.T) {
+func TestCheckRemoteSize_Non200IsLoggedNotMismatched(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "v.mp4")
 	os.WriteFile(localPath, make([]byte, 1024), 0644)
 
-	srv := fakeVideoServer(t, boosty.UserAgent, http.StatusOK, 1024)
+	srv := fakeHeadServer(t, boosty.UserAgent, http.StatusOK, 1024)
 	defer srv.Close()
 
 	log := &recordingLogger{}
-	got := checkRemoteVideoSize(srv.Client(), "Wrong/UA", log, srv.URL, localPath, "v.mp4")
+	got := checkRemoteSize(srv.Client(), "Wrong/UA", log, srv.URL, localPath, "v.mp4")
 	if got != "" {
 		t.Errorf("got %q, want empty (non-200 HEAD is not a size verdict)", got)
 	}
@@ -221,32 +201,32 @@ func TestCheckRemoteVideoSize_Non200IsLoggedNotMismatched(t *testing.T) {
 }
 
 // Passing the correct UA through the real path should produce no mismatch.
-func TestCheckRemoteVideoSize_CorrectUA(t *testing.T) {
+func TestCheckRemoteSize_CorrectUA(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "v.mp4")
 	os.WriteFile(localPath, make([]byte, 1024), 0644)
 
-	srv := fakeVideoServer(t, boosty.UserAgent, http.StatusOK, 1024)
+	srv := fakeHeadServer(t, boosty.UserAgent, http.StatusOK, 1024)
 	defer srv.Close()
 
 	log := &recordingLogger{}
-	got := checkRemoteVideoSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "v.mp4")
+	got := checkRemoteSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "v.mp4")
 	if got != "" {
 		t.Errorf("got %q, want empty", got)
 	}
 }
 
-func TestCheckRemoteVideoSize_NoContentLengthIsLoggedNotMismatched(t *testing.T) {
+func TestCheckRemoteSize_NoContentLengthIsLoggedNotMismatched(t *testing.T) {
 	dir := t.TempDir()
 	localPath := filepath.Join(dir, "v.mp4")
 	os.WriteFile(localPath, []byte("x"), 0644)
 
 	// Server returns 200 with no Content-Length.
-	srv := fakeVideoServer(t, boosty.UserAgent, http.StatusOK, -1)
+	srv := fakeHeadServer(t, boosty.UserAgent, http.StatusOK, -1)
 	defer srv.Close()
 
 	log := &recordingLogger{}
-	got := checkRemoteVideoSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "v.mp4")
+	got := checkRemoteSize(srv.Client(), boosty.UserAgent, log, srv.URL, localPath, "v.mp4")
 	if got != "" {
 		t.Errorf("got %q, want empty (transient → logged, not mismatch)", got)
 	}
