@@ -1483,6 +1483,45 @@ func TestGetJSON_AdoptsTokensAfterRejection(t *testing.T) {
 	}
 }
 
+// Two processes POST the same refresh token a few ms apart: the loser's 4xx
+// arrives before the winner's save lands. The loser must wait for that save
+// instead of aborting with "get new tokens".
+func TestGetJSON_AdoptsTokensSavedAfterRejection(t *testing.T) {
+	srv, hc := newAuthServer(t)
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	if err := tok.SaveTokens(authPath); err != nil {
+		t.Fatal(err)
+	}
+	var raced atomic.Bool
+	saved := make(chan struct{})
+	srv.onRefresh = func(s *authServer) {
+		if raced.Swap(true) {
+			return
+		}
+		s.rotate()
+		other := Tokens{AccessToken: s.access, RefreshToken: s.refresh, ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+		go func() {
+			defer close(saved)
+			time.Sleep(150 * time.Millisecond)
+			if err := other.SaveTokens(authPath); err != nil {
+				t.Errorf("simulate other process: %v", err)
+			}
+		}()
+	}
+	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
+
+	var out map[string]string
+	err := c.GetJSON(BaseURL+"/v1/x", &out)
+	<-saved
+	if err != nil {
+		t.Fatalf("GetJSON: %v", err)
+	}
+	if tok.RefreshToken != "r2" {
+		t.Errorf("refresh token = %q, want the adopted r2", tok.RefreshToken)
+	}
+}
+
 // An auth.json older than the in-memory pair (restored from a backup, or a
 // startup rewrite by another b00p that raced our save) holds a consumed
 // refresh token; adopting it would kill a working client.
