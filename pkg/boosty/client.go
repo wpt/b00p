@@ -285,9 +285,9 @@ func (c *Client) refreshAndSave(staleToken string) error {
 	if err := c.Tokens.Refresh(c.HTTP); err != nil {
 		if errors.Is(err, ErrRefreshRejected) {
 			c.rejectedRefresh, c.rejectedErr = c.Tokens.RefreshToken, err
-			// Another process may have saved its rotated pair between the
-			// read above and our POST.
-			if c.adoptDiskTokens() {
+			// Another process may have rotated our refresh token between
+			// the read above and our POST; its save can land after our 4xx.
+			if c.awaitDiskTokens() {
 				return nil
 			}
 		}
@@ -340,6 +340,27 @@ func (c *Client) adoptDiskTokens() bool {
 	}
 	*c.Tokens = *disk
 	return true
+}
+
+// adoptWait bounds how long a rejected refresh waits for another process's
+// rotated pair to reach AuthPath. Two runs that POST the same refresh token
+// a few ms apart get 200 and 4xx at about the same moment, before the
+// winner's save lands. A package variable so tests can shrink it.
+var adoptWait = time.Second
+
+// awaitDiskTokens retries adoptDiskTokens until it adopts a pair or
+// adoptWait runs out. Caller holds tokensMu.
+func (c *Client) awaitDiskTokens() bool {
+	deadline := time.Now().Add(adoptWait)
+	for {
+		if c.adoptDiskTokens() {
+			return true
+		}
+		if c.AuthPath == "" || time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // saveFallback handles a rotated pair that SaveTokens could not write to
