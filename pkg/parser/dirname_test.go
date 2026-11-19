@@ -107,12 +107,14 @@ func TestSanitizeTitle_ByteCap(t *testing.T) {
 }
 
 func TestValidateFormat(t *testing.T) {
-	for _, ok := range []string{DefaultFormat, "{date:ymd}_{title}", "{id}", "plain", "{date}-{id}-{title}"} {
+	for _, ok := range []string{DefaultFormat, "{date:ymd}_{title}", "{id}", "plain", "{date}-{id}-{title}", "{date:d.m.y} {title}", "{date:y_m}"} {
 		if err := ValidateFormat(ok); err != nil {
 			t.Errorf("ValidateFormat(%q) = %v, want nil", ok, err)
 		}
 	}
-	for _, bad := range []string{"{tittle}", "{date}_{titel}", "{ID}"} {
+	for _, bad := range []string{"{tittle}", "{date}_{titel}", "{ID}",
+		"{date:yyyy-mm-dd}", "{date:YYYY-MM-DD}", "{date:2006-01-02}", "{date:-}", "{title:x}",
+		"{date}_{title", "{date}_title}", "{{title}}"} {
 		err := ValidateFormat(bad)
 		if err == nil {
 			t.Errorf("ValidateFormat(%q) = nil, want error", bad)
