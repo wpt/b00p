@@ -464,3 +464,18 @@ func TestEngine_StateLossReusesArchivedFolder(t *testing.T) {
 		t.Errorf("post folders = %v, want only the old one", folders)
 	}
 }
+
+// A --sync without --yes under cron gets EOF on stdin: it must exit non-zero
+// (nothing was applied), not look like an explicit "n".
+func TestEngine_HeadlessSyncWithoutYesFails(t *testing.T) {
+	f := newFakeAPI(t)
+	f.PostsList("myblog", boosty.Post{ID: "p1", Title: "t", HasAccess: true, UpdatedAt: 100, PublishTime: 1700000000})
+	e := New(f.client, Config{Blog: "myblog", OutputDir: t.TempDir(), In: strings.NewReader("")})
+	if err := e.Sync(); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("Sync with closed stdin: err = %v, want an error pointing at --yes", err)
+	}
+	e = New(f.client, Config{Blog: "myblog", OutputDir: t.TempDir(), In: strings.NewReader("n\n")})
+	if err := e.Sync(); err != nil {
+		t.Errorf("Sync answered n: err = %v, want nil", err)
+	}
+}

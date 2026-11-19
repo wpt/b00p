@@ -18,11 +18,14 @@ import (
 // would vanish under `b00p ... > out.txt` redirection and the run would
 // appear to hang waiting on stdin. Only the structural log lines go through
 // `log` so tests can observe behavior via a fake logger.
-func confirmApply(log boosty.Logger, in *bufio.Reader, auto bool) bool {
+//
+// No answer at all (stdin closed: cron, nohup, systemd, SSH without a TTY)
+// is an error, so the run exits non-zero instead of looking like an "n".
+func confirmApply(log boosty.Logger, in *bufio.Reader, auto bool) (bool, error) {
 	log.Printf("")
 	if auto {
 		log.Printf("Auto-applying (--yes).")
-		return true
+		return true, nil
 	}
 	fmt.Fprint(os.Stderr, "Apply changes? [y/N] ")
 	answer, err := in.ReadString('\n')
@@ -30,10 +33,10 @@ func confirmApply(log boosty.Logger, in *bufio.Reader, auto bool) bool {
 	// with io.EOF; only an EOF with nothing read is a failed confirmation.
 	if err != nil && (!errors.Is(err, io.EOF) || answer == "") {
 		log.Printf("  warning: failed to read confirmation: %v", err)
-		return false
+		return false, fmt.Errorf("no answer to the confirmation prompt (%w); pass --yes to apply without asking", err)
 	}
 	answer = strings.TrimSpace(strings.ToLower(answer))
-	return answer == "y" || answer == "yes"
+	return answer == "y" || answer == "yes", nil
 }
 
 // displaySync prints the actionable list and a per-flag summary.
