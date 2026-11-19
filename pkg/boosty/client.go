@@ -12,9 +12,12 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wpt/b00p/pkg/fileutil"
 )
 
 // ErrFetchPage marks a page-level failure in FetchPosts: the whole page
@@ -34,6 +37,12 @@ var ErrFetchPage = errors.New("page fetch failed")
 // credential). Only the request that ran the refresh gets this error; callers
 // that own a whole run check Client.TokenSaveErr before reporting success.
 var ErrTokenSaveFailed = errors.New("token refresh succeeded but saving auth file failed")
+
+// ErrAuthNotWritable marks a refresh the client did not send because nothing
+// could be written next to the auth file: the server would consume the old
+// refresh token and the new pair would have nowhere to go. GetJSON fails
+// fast on it; the condition will not clear within the retry schedule.
+var ErrAuthNotWritable = errors.New("not refreshing tokens")
 
 const (
 	// BaseURL is the Boosty API origin every URL builder in urls.go prefixes.
@@ -158,7 +167,7 @@ func (c *Client) GetJSON(url string, out any) error {
 
 		resp, err := c.doRequest("GET", url)
 		if err != nil {
-			if errors.Is(err, ErrRefreshRejected) || errors.Is(err, ErrTokenSaveFailed) {
+			if errors.Is(err, ErrRefreshRejected) || errors.Is(err, ErrTokenSaveFailed) || errors.Is(err, ErrAuthNotWritable) {
 				return err
 			}
 			lastErr = err
@@ -292,6 +301,14 @@ func (c *Client) refreshAndSave(staleToken string) error {
 	}
 	if c.refreshRejected() {
 		return c.rejectedErr
+	}
+	// The server consumes the old refresh token the moment it answers, so
+	// a refresh whose result cannot be saved (the disk filled up, the
+	// directory went read-only mid-run) is a lockout. Check first.
+	if c.AuthPath != "" {
+		if err := fileutil.ProbeWrite(filepath.Dir(c.AuthPath), 4096); err != nil {
+			return fmt.Errorf("%w: cannot write next to %s (%w); a refresh now would leave no saved credential", ErrAuthNotWritable, c.AuthPath, err)
+		}
 	}
 	if err := c.Tokens.Refresh(c.HTTP); err != nil {
 		if errors.Is(err, ErrRefreshRejected) {
