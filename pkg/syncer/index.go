@@ -1,6 +1,7 @@
 package syncer
 
 import (
+	"cmp"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -58,7 +59,12 @@ func renderBlogIndex(blog string, posts map[string]state.PostEntry) string {
 		// link structure. Angle-bracket destination: CommonMark-safe for
 		// directory names containing spaces. SanitizeTitle strips < and > from
 		// titles, so the name cannot terminate the brackets early.
-		fmt.Fprintf(&b, "- [%s](<./%s/>)", parser.EscapeMarkdownLabel(r.e.Title), r.e.DirName)
+		// A destination is still a URL inside <>: '#' starts a fragment and
+		// '%' an escape, which would point numbered titles ("Stream #12",
+		// "100%") at a folder that does not exist.
+		label := cmp.Or(r.e.Title, r.e.DirName) // an empty title would be an invisible link
+		dest := strings.NewReplacer("%", "%25", "#", "%23", "?", "%3F").Replace(r.e.DirName)
+		fmt.Fprintf(&b, "- [%s](<./%s/>)", parser.EscapeMarkdownLabel(label), dest)
 		if r.e.HasComments {
 			fmt.Fprintf(&b, " — %d comment(s)", r.e.CommentsCount)
 		}

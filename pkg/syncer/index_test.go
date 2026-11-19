@@ -135,3 +135,18 @@ func TestEngine_DownloadAll_WritesBlogIndex(t *testing.T) {
 		t.Errorf("index.md missing the post title:\n%s", idx)
 	}
 }
+
+// '#', '%' and '?' in a folder name must be percent-escaped in the link
+// destination, and an empty title must still give a visible link.
+func TestRenderBlogIndex_EscapesDestinationAndEmptyTitle(t *testing.T) {
+	out := renderBlogIndex("b", map[string]state.PostEntry{
+		"a": {Title: "Stream #12 at 100%?", DirName: "2026-01-01_Stream #12 at 100%"},
+		"b": {Title: "", DirName: "2026-01-02_b"},
+	})
+	if !strings.Contains(out, "(<./2026-01-01_Stream %2312 at 100%25/>)") {
+		t.Errorf("destination not escaped:\n%s", out)
+	}
+	if !strings.Contains(out, "- [2026-01-02_b](<./2026-01-02_b/>)") {
+		t.Errorf("empty title not labelled with the folder:\n%s", out)
+	}
+}
