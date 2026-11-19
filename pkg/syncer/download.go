@@ -15,8 +15,8 @@ type postJob struct {
 
 // DownloadAll fetches every post in the blog and saves any that are not yet
 // in state, plus tracked posts whose entry is Locked but which are accessible
-// again. With Config.Force, state is ignored and every accessible post is
-// re-processed (see Config.Force for what is still skipped).
+// again. With Config.Force every accessible post is re-processed (see
+// Config.Force for what the prior entry still decides).
 //
 // State is saved per-completed post under a mutex so a mid-run crash leaves
 // a consistent _state.json. The per-blog lock is held for the whole run; if

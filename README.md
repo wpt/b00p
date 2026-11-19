@@ -72,7 +72,7 @@ b00p download --blog <blog> --sync --yes
 | `--check-media` | With `--sync`: re-download videos whose size differs from the server |
 | `--force` | Process every post again, not only new ones |
 | `--workers N` | Posts processed in parallel (default 1) |
-| `--format FMT` | Post folder name (default `{date}_{title}`) |
+| `--format FMT` | Folder name for new posts (default `{date}_{title}`); existing folders keep theirs |
 | `-o, --output DIR` | Output directory (default `output`) |
 | `--auth FILE` | Token file (default `auth.json`) |
 

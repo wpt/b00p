@@ -119,8 +119,9 @@ func Load(dir string) (*State, error) {
 // their IDs. filepath.Join(blogDir, "") is blogDir, so such an entry (written
 // by builds that predate the write-side guard in the syncer) would aim every
 // per-post read and write at the blog root. Dropping it makes the post
-// re-classify as new; files already on disk are skipped by the download
-// integrity check.
+// re-classify as new. Its files are reused only if the freshly formatted
+// directory name matches the old folder; otherwise the post is downloaded
+// again into a new one.
 func (s *State) DropEmptyDirNames() []string {
 	var dropped []string
 	for id, e := range s.Posts {
