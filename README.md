@@ -16,7 +16,7 @@ Command-line downloader for [boosty.to](https://boosty.to). Archives the posts y
 
 Download the binary for your platform from [Releases](https://github.com/wpt/b00p/releases) (`b00p_linux_amd64`, `b00p_windows_amd64.exe`, `b00p_darwin_arm64`, …), rename it to `b00p` (`b00p.exe` on Windows) and put it on your `PATH`. On Linux and macOS, run `chmod +x b00p`.
 
-Or build from source with Go 1.26.9+:
+Or build from source with Go 1.26.11+:
 
 ```bash
 go install github.com/wpt/b00p@latest
