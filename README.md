@@ -30,7 +30,7 @@ b00p uses your browser session:
 2. Copy the value of the `auth` cookie.
 3. Save it as `auth.json` in the directory you run b00p from, or pass its path with `--auth`. The percent-encoded value (`%7B%22accessToken…`) works as is.
 
-b00p refreshes the tokens itself. Don't use the same `auth.json` on two machines: each refresh invalidates the other copy.
+b00p refreshes the tokens itself when they expire (about a month). For that it needs the browser's device id: add `"deviceId": "<value>"` to `auth.json` (b00p rewrites it as plain JSON on the first run), with the value of `_clientId` from the same Cookies list or from Local Storage. Don't use the same `auth.json` on two machines: each refresh invalidates the other copy.
 
 Check that it works:
 

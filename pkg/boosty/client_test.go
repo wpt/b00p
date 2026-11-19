@@ -1142,8 +1142,8 @@ func TestGetJSON_RefreshRejected4xxFailsFast(t *testing.T) {
 	c := &Client{
 		Tokens: &Tokens{
 			AccessToken:  "stale",
-			RefreshToken: "dead",
-			ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(), // forces the proactive refresh
+			RefreshToken: "dead", DeviceID: "dev",
+			ExpiresAt: time.Now().Add(-time.Hour).UnixMilli(), // forces the proactive refresh
 		},
 		HTTP: rewriteClient(t, server),
 		Log:  discardLogger{},
@@ -1184,8 +1184,8 @@ func TestGetJSON_Refresh5xxStaysRetriable(t *testing.T) {
 	c := &Client{
 		Tokens: &Tokens{
 			AccessToken:  "stale",
-			RefreshToken: "r",
-			ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(),
+			RefreshToken: "r", DeviceID: "dev",
+			ExpiresAt: time.Now().Add(-time.Hour).UnixMilli(),
 		},
 		HTTP: rewriteClient(t, server),
 		Log:  discardLogger{},
@@ -1245,8 +1245,7 @@ func (s *authServer) rotate() {
 
 func (s *authServer) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	s.refreshPosts.Add(1)
-	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := r.ParseForm(); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -1255,7 +1254,7 @@ func (s *authServer) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if s.onRefresh != nil {
 		s.onRefresh(s)
 	}
-	if body["refresh_token"] != s.refresh {
+	if r.PostForm.Get("grant_type") != "refresh_token" || r.PostForm.Get("device_id") == "" || r.PostForm.Get("refresh_token") != s.refresh {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -1341,7 +1340,7 @@ func TestGetJSON_ConcurrentRefreshDedup(t *testing.T) {
 		}
 	}
 	authPath := filepath.Join(t.TempDir(), "auth.json")
-	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1"}
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "dev"}
 	if err := tok.SaveTokens(authPath); err != nil {
 		t.Fatal(err)
 	}
@@ -1389,7 +1388,7 @@ func TestGetJSON_RefreshSaveFailureKeepsRotatedTokens(t *testing.T) {
 	if err := os.Mkdir(authPath, 0700); err != nil {
 		t.Fatal(err)
 	}
-	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "dev", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
 
 	var out map[string]string
@@ -1433,7 +1432,7 @@ func TestGetJSON_RefreshSaveAndFallbackFailure(t *testing.T) {
 	defer func() { RetryDelays, fileutil.LockRetryWindow = saved, savedWindow }()
 
 	_, hc := newAuthServer(t)
-	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "dev", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	// The directory is writable (the pre-refresh probe passes), but both
 	// auth.json and auth.json.new are directories, so both saves fail.
 	authPath := filepath.Join(t.TempDir(), "auth.json")
@@ -1467,7 +1466,7 @@ func TestGetJSON_RefreshSaveAndFallbackFailure(t *testing.T) {
 func TestGetJSON_AdoptsTokensRotatedByAnotherProcess(t *testing.T) {
 	srv, hc := newAuthServer(t)
 	authPath := filepath.Join(t.TempDir(), "auth.json")
-	loaded := Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	loaded := Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "dev", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	if err := loaded.SaveTokens(authPath); err != nil {
 		t.Fatal(err)
 	}
@@ -1498,7 +1497,7 @@ func TestGetJSON_AdoptsTokensRotatedByAnotherProcess(t *testing.T) {
 func TestGetJSON_AdoptsTokensAfterRejection(t *testing.T) {
 	srv, hc := newAuthServer(t)
 	authPath := filepath.Join(t.TempDir(), "auth.json")
-	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "dev", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	if err := tok.SaveTokens(authPath); err != nil {
 		t.Fatal(err)
 	}
@@ -1508,7 +1507,7 @@ func TestGetJSON_AdoptsTokensAfterRejection(t *testing.T) {
 			return
 		}
 		s.rotate()
-		other := Tokens{AccessToken: s.access, RefreshToken: s.refresh, ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+		other := Tokens{AccessToken: s.access, RefreshToken: s.refresh, DeviceID: "dev", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
 		if err := other.SaveTokens(authPath); err != nil {
 			t.Errorf("simulate other process: %v", err)
 		}
@@ -1533,7 +1532,7 @@ func TestGetJSON_AdoptsTokensAfterRejection(t *testing.T) {
 func TestGetJSON_AdoptsTokensSavedAfterRejection(t *testing.T) {
 	srv, hc := newAuthServer(t)
 	authPath := filepath.Join(t.TempDir(), "auth.json")
-	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "dev", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	if err := tok.SaveTokens(authPath); err != nil {
 		t.Fatal(err)
 	}
@@ -1544,7 +1543,7 @@ func TestGetJSON_AdoptsTokensSavedAfterRejection(t *testing.T) {
 			return
 		}
 		s.rotate()
-		other := Tokens{AccessToken: s.access, RefreshToken: s.refresh, ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+		other := Tokens{AccessToken: s.access, RefreshToken: s.refresh, DeviceID: "dev", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
 		go func() {
 			defer close(saved)
 			time.Sleep(150 * time.Millisecond)
@@ -1575,11 +1574,11 @@ func TestGetJSON_IgnoresOlderTokensOnDisk(t *testing.T) {
 	srv.rotate() // the server now accepts r2 only
 	srv.mu.Unlock()
 	authPath := filepath.Join(t.TempDir(), "auth.json")
-	backup := Tokens{AccessToken: "a1", RefreshToken: "r1", ExpiresAt: time.Now().Add(-2 * time.Hour).UnixMilli()}
+	backup := Tokens{AccessToken: "a1", RefreshToken: "r1", DeviceID: "dev", ExpiresAt: time.Now().Add(-2 * time.Hour).UnixMilli()}
 	if err := backup.SaveTokens(authPath); err != nil {
 		t.Fatal(err)
 	}
-	tok := &Tokens{AccessToken: "a2", RefreshToken: "r2", ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()}
+	tok := &Tokens{AccessToken: "a2", RefreshToken: "r2", DeviceID: "dev", ExpiresAt: time.Now().Add(-time.Minute).UnixMilli()}
 	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
 
 	var out map[string]string
@@ -1606,8 +1605,8 @@ func TestGetJSON_RejectedRefreshIsNotRetried(t *testing.T) {
 	c := &Client{
 		Tokens: &Tokens{
 			AccessToken:  "stale",
-			RefreshToken: "dead",
-			ExpiresAt:    time.Now().Add(-time.Hour).UnixMilli(),
+			RefreshToken: "dead", DeviceID: "dev",
+			ExpiresAt: time.Now().Add(-time.Hour).UnixMilli(),
 		},
 		HTTP: rewriteClient(t, server),
 		Log:  discardLogger{},
@@ -1653,7 +1652,7 @@ func TestRefresh_StatusClassification(t *testing.T) {
 			}))
 			defer server.Close()
 
-			tok := &Tokens{AccessToken: "a", RefreshToken: "r"}
+			tok := &Tokens{AccessToken: "a", RefreshToken: "r", DeviceID: "dev"}
 			err := tok.Refresh(rewriteClient(t, server))
 			if err == nil {
 				t.Fatalf("Refresh should fail on %d", tc.status)
@@ -1729,7 +1728,7 @@ func TestGetJSON_ErrorBodyIsSnippet(t *testing.T) {
 func TestGetJSON_NoRefreshWhenAuthDirUnwritable(t *testing.T) {
 	srv, hc := newAuthServer(t)
 	authPath := filepath.Join(t.TempDir(), "gone", "auth.json")
-	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	tok := &Tokens{AccessToken: "a0", RefreshToken: "r1", DeviceID: "dev", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	c := &Client{Tokens: tok, AuthPath: authPath, HTTP: hc, Log: discardLogger{}}
 
 	err := c.GetJSON(BaseURL+"/v1/x", &map[string]string{})

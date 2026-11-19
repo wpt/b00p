@@ -25,6 +25,10 @@ import (
 //lint:ignore ST1005 the message renders mid-sentence after "(status %d)." — the capital starts the user-facing instruction sentence, not an error string.
 var ErrRefreshRejected = errors.New("Get new tokens from browser cookies and update auth.json")
 
+// ErrNoDeviceID marks a refresh that cannot be sent: auth.json has no
+// deviceId, the browser's _clientId, which the token endpoint requires.
+var ErrNoDeviceID = errors.New(`access token expired and auth.json has no "deviceId": copy the _clientId value from boosty.to (DevTools → Application → Cookies or Local Storage) into auth.json as "deviceId"`)
+
 // Tokens holds authentication credentials for the Boosty API.
 type Tokens struct {
 	AccessToken  string `json:"accessToken"`
@@ -108,14 +112,6 @@ func (t *Tokens) SaveTokens(path string) error {
 	return fileutil.WriteFileAtomic(path, data, 0600)
 }
 
-// refreshRequest is the POST body sent to /oauth/token/. A typed struct so
-// json.Marshal handles escaping for arbitrary token contents (backslashes,
-// quotes, newlines).
-type refreshRequest struct {
-	DeviceID     string `json:"device_id"`
-	RefreshToken string `json:"refresh_token"`
-}
-
 // refreshResponse is the /oauth/token/ success payload.
 type refreshResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -129,18 +125,24 @@ func (t *Tokens) Refresh(httpClient *http.Client) error {
 		httpClient = http.DefaultClient
 	}
 
-	body, err := json.Marshal(refreshRequest{
-		DeviceID:     t.DeviceID,
-		RefreshToken: t.RefreshToken,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal refresh body: %w", err)
+	// The server rejects a refresh without the browser's device id, and
+	// that 4xx would read as a dead token ("get new tokens").
+	if t.DeviceID == "" {
+		return ErrNoDeviceID
 	}
-	req, err := http.NewRequest("POST", BaseURL+"/oauth/token/", bytes.NewReader(body))
+	// An OAuth2 refresh grant, form-encoded, as the web app and other
+	// clients send it; device_id is the browser's _clientId.
+	body := neturl.Values{
+		"device_id":     {t.DeviceID},
+		"device_os":     {"web"},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {t.RefreshToken},
+	}.Encode()
+	req, err := http.NewRequest("POST", BaseURL+"/oauth/token/", strings.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create refresh request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	// /oauth/token/ sits behind the same edge as the API and rejects naked
 	// (no UA) requests as bots; mirror what rawRequest sends on every other
 	// call so refresh does not become the one bot-flagged endpoint.
