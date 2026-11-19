@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf16"
 
 	"github.com/wpt/b00p/pkg/fileutil"
 )
@@ -266,5 +267,41 @@ func TestTokens_SaveTokens_BareFilename(t *testing.T) {
 	loaded, err := LoadTokens(filepath.Join(dir, "auth.json"))
 	if err != nil || loaded.AccessToken != "a" {
 		t.Errorf("round-trip mismatch: %+v err=%v", loaded, err)
+	}
+}
+
+// Windows editors and PowerShell 5.1 (Set-Content, Out-File, >) save
+// auth.json with a UTF-8 BOM or as UTF-16; both must load like plain UTF-8.
+func TestLoadTokens_BOMAndUTF16(t *testing.T) {
+	const doc = `{"accessToken":"a","refreshToken":"r"}`
+	utf16le := func(s string, bom []byte, bigEndian bool) []byte {
+		out := append([]byte{}, bom...)
+		for _, u := range utf16.Encode([]rune(s)) {
+			if bigEndian {
+				out = append(out, byte(u>>8), byte(u))
+			} else {
+				out = append(out, byte(u), byte(u>>8))
+			}
+		}
+		return out
+	}
+	for name, data := range map[string][]byte{
+		"utf-8 bom":    append([]byte("\xef\xbb\xbf"), doc...),
+		"utf-16le bom": utf16le(doc, []byte{0xff, 0xfe}, false),
+		"utf-16be bom": utf16le(doc, []byte{0xfe, 0xff}, true),
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "auth.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			tok, err := LoadTokens(path)
+			if err != nil {
+				t.Fatalf("LoadTokens: %v", err)
+			}
+			if tok.AccessToken != "a" || tok.RefreshToken != "r" {
+				t.Errorf("tokens = %+v", tok)
+			}
+		})
 	}
 }

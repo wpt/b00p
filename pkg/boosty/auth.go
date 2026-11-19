@@ -2,6 +2,7 @@ package boosty
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/wpt/b00p/pkg/fileutil"
 )
@@ -46,6 +48,7 @@ func LoadTokens(path string) (*Tokens, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read auth file: %w", err)
 	}
+	data = decodeAuthText(data)
 
 	var tokens Tokens
 	if err := json.Unmarshal(data, &tokens); err != nil {
@@ -69,6 +72,27 @@ func LoadTokens(path string) (*Tokens, error) {
 	}
 
 	return &tokens, nil
+}
+
+// decodeAuthText returns data as UTF-8. Windows editors and PowerShell 5.1
+// (Set-Content, Out-File, >) save auth.json with a UTF-8 BOM or as UTF-16
+// with a BOM, which json.Unmarshal rejects as an invisible character.
+func decodeAuthText(data []byte) []byte {
+	if b, ok := bytes.CutPrefix(data, []byte("\xef\xbb\xbf")); ok {
+		return b
+	}
+	if len(data) < 2 || !(data[0] == 0xff && data[1] == 0xfe || data[0] == 0xfe && data[1] == 0xff) {
+		return data
+	}
+	order := binary.ByteOrder(binary.LittleEndian)
+	if data[0] == 0xfe {
+		order = binary.BigEndian
+	}
+	units := make([]uint16, (len(data)-2)/2)
+	for i := range units {
+		units[i] = order.Uint16(data[2+2*i:])
+	}
+	return []byte(string(utf16.Decode(units)))
 }
 
 // SaveTokens writes tokens to a JSON file atomically (see
