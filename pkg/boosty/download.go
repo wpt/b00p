@@ -393,7 +393,15 @@ func (c *Client) downloadOnce(req DownloadRequest) error {
 	}
 
 	_, copyErr := io.Copy(pw, resp.Body)
-	closeErr := f.Close()
+	// fsync before the rename: state is fsynced right after a file lands,
+	// so without it a power loss can leave state naming a file whose bytes
+	// never reached the disk (a zero-filled or short copy at the right
+	// name). A sync failure counts like a close failure: durability suspect.
+	var syncErr error
+	if copyErr == nil {
+		syncErr = f.Sync()
+	}
+	closeErr := errors.Join(syncErr, f.Close())
 	if hasProgress {
 		plog.ClearProgress()
 	}
